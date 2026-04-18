@@ -69,6 +69,13 @@ class BaseAdapter(ABC):
         ...
 
     @abstractmethod
+    def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
+        """List available sessions for a directory.
+        Returns: [{"id": str, "preview": str, "age": str, "messages": int}]
+        """
+        ...
+
+    @abstractmethod
     def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
         """Clear/end the session for the given working directory."""
         ...

@@ -114,6 +114,10 @@ class WasabiAdapter(BaseAdapter):
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "wasabi CLI not found", "session_id": None}
 
+    def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
+        """Wasabi auto-resumes per directory — return single 'auto' entry."""
+        return [{"id": "auto", "preview": "Auto-resume session (wasabi)", "age": "auto", "messages": 0}]
+
     def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
         """Clear wasabi session by running with --disable-continue."""
         cfg = config or {}

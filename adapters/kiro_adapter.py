@@ -129,6 +129,30 @@ class KiroAdapter(BaseAdapter):
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "kiro-cli not found", "session_id": None}
 
+    def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
+        """List Kiro sessions for a directory."""
+        try:
+            kiro_bin = self._find_kiro_path()
+            result = subprocess.run(
+                [kiro_bin, "chat", "--list-sessions"],
+                cwd=cwd, capture_output=True, text=True, timeout=10,
+            )
+            sessions = []
+            lines = result.stdout.split("\n")
+            for i, line in enumerate(lines):
+                clean = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+                if "Chat SessionId:" in clean:
+                    sid = clean.split("Chat SessionId:")[-1].strip()
+                    # Next line has age + preview
+                    preview = ""
+                    if i + 1 < len(lines):
+                        next_clean = re.sub(r'\x1b\[[0-9;]*m', '', lines[i + 1]).strip()
+                        preview = next_clean[:60]
+                    sessions.append({"id": sid, "preview": preview, "age": "", "messages": 0})
+            return sessions[:10]
+        except Exception:
+            return []
+
     def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
         """Delete all sessions for this directory."""
         try:

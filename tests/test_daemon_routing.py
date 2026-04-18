@@ -32,6 +32,14 @@ def make_daemon():
     d._task_queue = []
     d._reminders = []
     d._queue_prefix = ""
+    d._progress_tracker = None
+    d._stuck_detector = None
+    d._picker_mode = False
+    d._picker_sessions = []
+    d._awaiting_keep_end = False
+    d._pending_switch_cwd = None
+    d._pending_switch_alias = None
+    d._picker_timeout_thread = None
     d.echo_filter = EchoFilter()
     d.running = True
     d._reply = MagicMock()

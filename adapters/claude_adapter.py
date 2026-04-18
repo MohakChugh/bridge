@@ -82,6 +82,26 @@ class ClaudeAdapter(BaseAdapter):
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "claude CLI not found", "session_id": None}
 
+    def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
+        """List Claude Code sessions. Parses `claude --resume list` output."""
+        try:
+            from .base import get_login_shell_env
+            env = get_login_shell_env()
+            result = subprocess.run(
+                ["zsh", "-i", "-c", "claude --resume list 2>&1 | head -15"],
+                cwd=cwd, capture_output=True, text=True, timeout=10, env=env,
+            )
+            sessions = []
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if not line or line.startswith("─") or line.startswith("No "):
+                    continue
+                # Parse lines like: "abc-123  2h ago  fix auth handler"
+                sessions.append({"id": line.split()[0] if line.split() else "", "preview": line[:60], "age": "", "messages": 0})
+            return sessions[:10]
+        except Exception:
+            return []
+
     def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
         # Claude sessions are cleared by removing session_id from state
         pass

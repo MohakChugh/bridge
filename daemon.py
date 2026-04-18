@@ -42,23 +42,33 @@ log = logging.getLogger("imessage-bridge")
 
 HELP_TEXT = (
     "Commands:\n"
+    "\n"
+    "Session:\n"
     "/status - what's happening now\n"
-    "/eta - task progress, todos, ETA (Claude Code only)\n"
-    "/eta interval 5m - change auto-update interval\n"
-    "/eta stuck 2h - change stuck alert threshold\n"
     "/end - end current session\n"
     "/cancel - kill running task\n"
-    "/switch <dir> - switch directory\n"
     "/history - last 5 messages\n"
     "/sessions - list saved sessions\n"
+    "\n"
+    "Navigation:\n"
+    "/switch <dir> - switch directory (shows sessions, pick by number)\n"
     "/dirs - show directory aliases\n"
-    "/queue <prompt> - run after current task\n"
-    "/remind <time> <msg> - send reminder\n"
     "/tool <name> - switch CLI tool (claude/wasabi/kiro)\n"
+    "\n"
+    "Progress (Claude Code only):\n"
+    "/eta - task progress, todos, ETA\n"
+    "/eta interval 5m - auto-update every 5 min (default 15m)\n"
+    "/eta stuck 2h - stuck alert threshold (default 90m)\n"
+    "/eta stuck off - disable stuck alerts\n"
+    "\n"
+    "Productivity:\n"
+    "/queue <prompt> - run after current task\n"
+    "/remind <time> <msg> - timed reminder (5m, 1h, 2h30m)\n"
     "/help - this message\n"
     "\n"
-    "Start session: new:<dir>: <prompt>\n"
-    "Continue: just type normally"
+    "Start: new:<dir>: <prompt>\n"
+    "Continue: just type normally\n"
+    "Dirs: home, centralis, frontend, nexus, default"
 )
 
 
@@ -122,6 +132,13 @@ class Daemon:
         self._reminders: list[dict] = []  # For /remind
         self._progress_tracker: Optional[ProgressTracker] = None
         self._stuck_detector: Optional[StuckDetector] = None
+        # Picker mode for /switch
+        self._picker_mode = False
+        self._picker_sessions: list[dict] = []
+        self._awaiting_keep_end = False
+        self._pending_switch_cwd: Optional[str] = None
+        self._pending_switch_alias: Optional[str] = None
+        self._picker_timeout_thread: Optional[threading.Timer] = None
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
@@ -174,6 +191,14 @@ class Daemon:
             return
 
         log.info(f"New message: {text[:80]}...")
+
+        # Intercept picker/keep-end flows before normal routing
+        if self._awaiting_keep_end:
+            self._handle_keep_end_reply(text.strip().lower())
+            return
+        if self._picker_mode:
+            self._handle_picker_reply(text.strip())
+            return
 
         # Handle commands (start with /)
         cmd = text.strip()
@@ -314,6 +339,9 @@ class Daemon:
         self._reply("\n".join(lines))
 
     def _cmd_switch(self, alias: str) -> None:
+        if self._busy:
+            self._reply("Busy. Wait or /cancel first.")
+            return
         alias_lower = alias.lower()
         dirs = self.config.get("directories", {})
         if alias_lower not in dirs:
@@ -324,10 +352,142 @@ class Daemon:
         if not os.path.isdir(new_cwd):
             self._reply(f"Directory not found: {new_cwd}")
             return
-        self.active_session_cwd = new_cwd
-        self.state["active_session_cwd"] = new_cwd
+
+        self._pending_switch_cwd = new_cwd
+        self._pending_switch_alias = alias_lower
+
+        if self.active_session_id:
+            self._awaiting_keep_end = True
+            self._reply("End current session or keep? (end/keep)")
+        else:
+            # No active session — go straight to listing
+            self._show_sessions_for_switch()
+
+    def _handle_keep_end_reply(self, reply: str) -> None:
+        """Process 'end' or 'keep' reply during /switch flow."""
+        self._awaiting_keep_end = False
+        if reply in ("end", "e"):
+            self.active_session_id = None
+            self.state["active_session_id"] = None
+            self.state["message_history"] = []
+            save_state(STATE_PATH, self.state)
+            log.info("Session ended during /switch")
+        elif reply in ("keep", "k"):
+            log.info("Session kept during /switch")
+        else:
+            self._reply("Didn't understand. Say 'end' or 'keep'.")
+            self._awaiting_keep_end = True
+            return
+
+        self._show_sessions_for_switch()
+
+    def _show_sessions_for_switch(self) -> None:
+        """Query adapter for sessions in target directory and show picker."""
+        cwd = self._pending_switch_cwd
+        alias = self._pending_switch_alias
+        if not cwd:
+            return
+
+        # Update cwd
+        self.active_session_cwd = cwd
+        self.state["active_session_cwd"] = cwd
         save_state(STATE_PATH, self.state)
-        self._reply(f"Switched to {alias_lower}.")
+
+        tool = self.config.get("cli_tool", "claude")
+        try:
+            adapter = get_adapter(tool)
+            sessions = adapter.list_sessions(cwd, self.config)
+        except Exception:
+            sessions = []
+
+        if not sessions:
+            self._pending_switch_cwd = None
+            self._pending_switch_alias = None
+            self.active_session_id = None
+            self.state["active_session_id"] = None
+            save_state(STATE_PATH, self.state)
+            self._reply(f"No sessions in {alias}. Send a message to start one.")
+            return
+
+        # Special case: wasabi auto-resume
+        if tool == "wasabi":
+            self._pending_switch_cwd = None
+            self._pending_switch_alias = None
+            self._save_active_session("auto", cwd)
+            self._reply(f"Switched to {alias}. Wasabi auto-resumes.")
+            return
+
+        # Show numbered list
+        self._picker_sessions = sessions
+        self._picker_mode = True
+        lines = [f"Sessions in {alias}:"]
+        for i, s in enumerate(sessions, 1):
+            preview = s.get("preview", "")[:50]
+            lines.append(f"  {i}. {preview}")
+        lines.append('Reply with number, or "new" for fresh.')
+        self._reply("\n".join(lines))
+
+        # 30s timeout → auto-resume latest
+        self._picker_timeout_thread = threading.Timer(30.0, self._picker_timeout)
+        self._picker_timeout_thread.daemon = True
+        self._picker_timeout_thread.start()
+
+    def _handle_picker_reply(self, reply: str) -> None:
+        """Process numbered session pick or 'new' during /switch."""
+        # Cancel timeout
+        if self._picker_timeout_thread:
+            self._picker_timeout_thread.cancel()
+            self._picker_timeout_thread = None
+
+        self._picker_mode = False
+        cwd = self._pending_switch_cwd or self.active_session_cwd
+        alias = self._pending_switch_alias or "unknown"
+        self._pending_switch_cwd = None
+        self._pending_switch_alias = None
+
+        if reply.lower() == "new":
+            self.active_session_id = None
+            self.state["active_session_id"] = None
+            save_state(STATE_PATH, self.state)
+            self._reply(f"Fresh start in {alias}. Send a message to begin.")
+            return
+
+        try:
+            idx = int(reply) - 1
+            if 0 <= idx < len(self._picker_sessions):
+                session = self._picker_sessions[idx]
+                sid = session.get("id", "auto")
+                self._save_active_session(sid, cwd)
+                preview = session.get("preview", "")[:40]
+                self._reply(f'Resumed "{preview}" in {alias}.')
+            else:
+                self._reply(f"Invalid number. Resuming latest.")
+                if self._picker_sessions:
+                    sid = self._picker_sessions[0].get("id", "auto")
+                    self._save_active_session(sid, cwd)
+        except ValueError:
+            self._reply(f"Didn't understand. Resuming latest in {alias}.")
+            if self._picker_sessions:
+                sid = self._picker_sessions[0].get("id", "auto")
+                self._save_active_session(sid, cwd)
+
+        self._picker_sessions = []
+
+    def _picker_timeout(self) -> None:
+        """Auto-resume latest session after 30s timeout."""
+        if not self._picker_mode:
+            return
+        self._picker_mode = False
+        alias = self._pending_switch_alias or "unknown"
+        cwd = self._pending_switch_cwd or self.active_session_cwd
+        self._pending_switch_cwd = None
+        self._pending_switch_alias = None
+
+        if self._picker_sessions:
+            sid = self._picker_sessions[0].get("id", "auto")
+            self._save_active_session(sid, cwd)
+            self._reply(f"Timeout. Auto-resumed latest in {alias}.")
+        self._picker_sessions = []
 
     def _cmd_queue(self, prompt: str) -> None:
         if not prompt:

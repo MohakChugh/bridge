@@ -198,26 +198,59 @@ class TestCmdDirs:
 # --- /switch ---
 
 class TestCmdSwitch:
-    def test_switch_valid(self):
+    def _add_picker_attrs(self, d):
+        """Add picker state attributes needed by enhanced /switch."""
+        d._picker_mode = False
+        d._picker_sessions = []
+        d._awaiting_keep_end = False
+        d._pending_switch_cwd = None
+        d._pending_switch_alias = None
+        d._picker_timeout_thread = None
+        d._progress_tracker = None
+        d._stuck_detector = None
+
+    def test_switch_no_session_shows_listing(self):
         d, replies = make_daemon()
-        # Use a real directory that exists
+        self._add_picker_attrs(d)
         d.config["directories"]["home"] = "/tmp"
         with patch("daemon.save_state"):
-            d._cmd_switch("home")
+            with patch("daemon.get_adapter") as mock_get:
+                mock_adapter = MagicMock()
+                mock_adapter.list_sessions.return_value = []
+                mock_get.return_value = mock_adapter
+                d._cmd_switch("home")
         assert d.active_session_cwd == "/tmp"
-        assert "Switched to home" in replies[0]
+        assert "No sessions" in replies[0]
+
+    def test_switch_with_session_asks_keep_end(self):
+        d, replies = make_daemon()
+        self._add_picker_attrs(d)
+        d.active_session_id = "abc-123"
+        d.config["directories"]["home"] = "/tmp"
+        d._cmd_switch("home")
+        assert d._awaiting_keep_end is True
+        assert "end" in replies[0].lower() and "keep" in replies[0].lower()
 
     def test_switch_invalid(self):
         d, replies = make_daemon()
+        self._add_picker_attrs(d)
         d._cmd_switch("nonexistent")
         assert "Unknown" in replies[0]
         assert "Available" in replies[0]
 
     def test_switch_dir_not_found(self):
         d, replies = make_daemon()
+        self._add_picker_attrs(d)
         d.config["directories"]["broken"] = "/nonexistent/path"
         d._cmd_switch("broken")
         assert "Directory not found" in replies[0]
+
+    def test_switch_busy_blocked(self):
+        d, replies = make_daemon()
+        self._add_picker_attrs(d)
+        d._busy = True
+        d._cmd_switch("home")
+        assert "Busy" in replies[0]
 
 
 # --- /queue ---
