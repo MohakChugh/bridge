@@ -24,7 +24,7 @@ from parser import parse_prefix
 from adapters import get_adapter, list_adapters
 from progress_tracker import ProgressTracker, StuckDetector
 from scheduler import cron_matches, next_cron_fire, parse_schedule_via_llm, format_schedule_list
-from transcriber import is_audio_attachment, transcribe
+# Voice transcription removed — high memory, low value
 from sender import send_imessage, OUTBOUND_MARKER
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
@@ -68,9 +68,6 @@ HELP_TEXT = (
     "/schedule <natural language> - recurring task (LLM parses)\n"
     "/schedule list - show active schedules\n"
     "/schedule cancel/pause/resume <N> - manage schedules\n"
-    "\n"
-    "Voice:\n"
-    "Send voice memo - auto-transcribes, confirm before executing\n"
     "\n"
     "Productivity:\n"
     "/queue <prompt> - run after current task\n"
@@ -152,9 +149,6 @@ class Daemon:
         self._pending_switch_cwd: Optional[str] = None
         self._pending_switch_alias: Optional[str] = None
         self._picker_timeout_thread: Optional[threading.Timer] = None
-        # Voice memo confirm flow
-        self._awaiting_voice_confirm = False
-        self._pending_voice_text: Optional[str] = None
         # Schedule confirm flow
         self._awaiting_schedule_confirm = False
         self._pending_schedule: Optional[dict] = None
@@ -205,22 +199,6 @@ class Daemon:
 
         text = msg["text"]
 
-        # Check for voice memo attachment FIRST (before text processing)
-        # iMessage voice memos have text=\ufffc (object replacement char) or empty
-        if msg.get("has_attachments"):
-            try:
-                attachments = self.chatdb.get_attachments(msg["rowid"])
-                for att in attachments:
-                    if is_audio_attachment(att.get("mime_type"), att.get("uti")):
-                        filepath = att.get("filename", "")
-                        if filepath:
-                            filepath = os.path.expanduser(filepath)
-                            log.info(f"Voice memo detected: {filepath}")
-                            self._handle_voice_attachment(filepath)
-                            return
-            except Exception as e:
-                log.warning(f"Attachment check failed: {e}")
-
         # Treat U+FFFC (object replacement) as empty — used by iMessage for attachment-only messages
         if not text or not text.strip() or text.strip() == "\ufffc":
             return
@@ -234,9 +212,6 @@ class Daemon:
         log.info(f"New message: {text[:80]}...")
 
         # Intercept confirm flows before normal routing
-        if self._awaiting_voice_confirm:
-            self._handle_voice_confirm(text.strip().lower())
-            return
         if self._awaiting_remind_confirm:
             self._handle_remind_confirm(text.strip().lower())
             return
@@ -930,38 +905,6 @@ class Daemon:
             save_state(STATE_PATH, self.state)
 
         threading.Thread(target=_run, daemon=True).start()
-
-    # --- /voice (auto-detect) ---
-
-    def _handle_voice_attachment(self, audio_path: str) -> None:
-        """Transcribe voice memo and enter confirm flow."""
-        self._reply("Transcribing...")
-
-        def _transcribe():
-            text = transcribe(audio_path)
-            if text:
-                self._pending_voice_text = text
-                self._awaiting_voice_confirm = True
-                self._reply(f'Heard: "{text}". Send? (y/n)')
-            else:
-                self._reply("Could not transcribe voice memo.")
-
-        threading.Thread(target=_transcribe, daemon=True).start()
-
-    def _handle_voice_confirm(self, reply: str) -> None:
-        self._awaiting_voice_confirm = False
-        text = self._pending_voice_text
-        self._pending_voice_text = None
-        if reply in ("y", "yes") and text:
-            # Route transcribed text as normal prompt
-            from parser import parse_prefix
-            parsed = parse_prefix(text)
-            if parsed and parsed["action"] == "spawn":
-                threading.Thread(target=self._handle_spawn, args=(parsed,), daemon=True).start()
-            elif parsed:
-                threading.Thread(target=self._handle_continue, args=(parsed,), daemon=True).start()
-        else:
-            self._reply("Voice prompt cancelled.")
 
     def _reminder_loop(self) -> None:
         """Background thread that fires reminders (in-memory + persisted)."""

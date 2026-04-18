@@ -40,8 +40,6 @@ def make_daemon():
     d._pending_switch_cwd = None
     d._pending_switch_alias = None
     d._picker_timeout_thread = None
-    d._awaiting_voice_confirm = False
-    d._pending_voice_text = None
     d._awaiting_schedule_confirm = False
     d._pending_schedule = None
     d._awaiting_remind_confirm = False
