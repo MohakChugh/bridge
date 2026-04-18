@@ -1,4 +1,8 @@
-"""Speech-to-text transcription for iMessage voice memos."""
+"""Speech-to-text transcription for iMessage voice memos.
+
+Priority: Parakeet V3 (via parakeet-mlx, Apple Silicon optimized)
+Fallback: OpenAI Whisper (universal, works on any hardware)
+"""
 
 from __future__ import annotations
 import logging
@@ -24,11 +28,10 @@ def is_audio_attachment(mime_type: Optional[str], uti: Optional[str]) -> bool:
 
 
 def convert_to_wav(input_path: str) -> Optional[str]:
-    """Convert audio file to WAV format for Whisper. Returns path to wav file."""
+    """Convert audio file to 16kHz mono WAV. Returns path to wav file."""
     if not os.path.isfile(input_path):
         return None
 
-    # If already wav, return as-is
     if input_path.lower().endswith(".wav"):
         return input_path
 
@@ -46,39 +49,71 @@ def convert_to_wav(input_path: str) -> Optional[str]:
     return None
 
 
-def transcribe(audio_path: str) -> Optional[str]:
-    """Transcribe audio file to text using Whisper.
+def _transcribe_parakeet(wav_path: str) -> Optional[str]:
+    """Transcribe using Parakeet V3 via parakeet-mlx (Apple Silicon optimized)."""
+    try:
+        from parakeet_mlx import from_pretrained
+        model = from_pretrained("mlx-community/parakeet-tdt-0.6b-v3")
+        result = model.transcribe(wav_path)
+        text = result.text.strip() if hasattr(result, 'text') else str(result).strip()
+        log.info(f"Parakeet V3 transcribed: {text[:60]}...")
+        return text if text else None
+    except ImportError:
+        return None
+    except Exception as e:
+        log.warning(f"Parakeet V3 failed: {e}")
+        return None
 
-    Converts to WAV first if needed, then runs Whisper.
-    Returns transcribed text or None on failure.
+
+def _transcribe_whisper(wav_path: str) -> Optional[str]:
+    """Transcribe using OpenAI Whisper (fallback)."""
+    try:
+        import whisper
+        model = whisper.load_model("base")
+        result = model.transcribe(wav_path, fp16=False)
+        text = result.get("text", "").strip()
+        log.info(f"Whisper transcribed: {text[:60]}...")
+        return text if text else None
+    except ImportError:
+        return None
+    except Exception as e:
+        log.warning(f"Whisper failed: {e}")
+        return None
+
+
+def transcribe(audio_path: str) -> Optional[str]:
+    """Transcribe audio file to text.
+
+    Tries Parakeet V3 first (faster on Apple Silicon), falls back to Whisper.
+    Converts to WAV first if needed.
     """
-    # Expand tilde
     audio_path = os.path.expanduser(audio_path)
 
     if not os.path.isfile(audio_path):
         log.warning(f"Audio file not found: {audio_path}")
         return None
 
-    # Convert to wav if not already
     wav_path = convert_to_wav(audio_path)
     if not wav_path:
         return None
 
+    cleanup_wav = wav_path != audio_path
+
     try:
-        import whisper
-        model = whisper.load_model("base")  # Fast + decent accuracy
-        result = model.transcribe(wav_path, fp16=False)
-        text = result.get("text", "").strip()
-        return text if text else None
-    except ImportError:
-        log.warning("Whisper not installed. Run: pip3 install --break-system-packages openai-whisper")
-        return None
-    except Exception as e:
-        log.warning(f"Transcription failed: {e}")
+        # Try Parakeet V3 first (Apple Silicon optimized)
+        text = _transcribe_parakeet(wav_path)
+        if text:
+            return text
+
+        # Fallback to Whisper
+        text = _transcribe_whisper(wav_path)
+        if text:
+            return text
+
+        log.warning("No STT model available. Install: pip3 install parakeet-mlx or openai-whisper")
         return None
     finally:
-        # Clean up converted wav (if we created it)
-        if wav_path != audio_path and os.path.isfile(wav_path):
+        if cleanup_wav and os.path.isfile(wav_path):
             try:
                 os.remove(wav_path)
             except OSError:
