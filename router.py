@@ -93,6 +93,12 @@ def _extract_pane_summary(pane_output: str, max_chars: int = 500) -> str:
     return text
 
 
+def _shell_quote(s: str) -> str:
+    """Shell-escape a string for safe embedding in a zsh -c command."""
+    import shlex
+    return shlex.quote(s)
+
+
 def _extract_session_id(output: str) -> Optional[str]:
     """Extract session_id from claude -p JSON output."""
     try:
@@ -107,11 +113,14 @@ def _extract_session_id(output: str) -> Optional[str]:
 def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_session_id: Optional[str] = None) -> dict:
     """Spawn a new claude -p session (or resume existing) and capture output."""
     try:
-        cmd = ["claude", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
+        # Build the claude command
+        claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions"
         if resume_session_id:
-            cmd.extend(["--resume", resume_session_id])
+            claude_cmd += " --resume " + _shell_quote(resume_session_id)
+        # Wrap in zsh login shell so it inherits full PATH, aliases,
+        # env vars from .zshrc/.zprofile (brazil, ada, toolbox, etc.)
         result = subprocess.run(
-            cmd,
+            ["zsh", "-l", "-c", claude_cmd],
             cwd=cwd,
             capture_output=True,
             text=True,
