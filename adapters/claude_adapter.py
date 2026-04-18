@@ -53,7 +53,7 @@ class ClaudeAdapter(BaseAdapter):
 
             env = get_login_shell_env()
             proc = subprocess.Popen(
-                ["zsh", "-c", cmd],
+                ["zsh", "-i", "-c", cmd],
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

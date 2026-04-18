@@ -83,7 +83,7 @@ class WasabiAdapter(BaseAdapter):
 
             env = get_login_shell_env()
             proc = subprocess.Popen(
-                ["zsh", "-c", wasabi_cmd],
+                ["zsh", "-i", "-c", wasabi_cmd],
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -123,7 +123,7 @@ class WasabiAdapter(BaseAdapter):
         try:
             env = get_login_shell_env()
             subprocess.run(
-                ["zsh", "-c",
+                ["zsh", "-i", "-c",
                  f"wasabi --disable-initial-workspace-summary --auto-accept-edits "
                  f"--dangerously-accept-all-prompts --model-arn={shlex.quote(model)} "
                  f"--skip-git-safety-check --account {shlex.quote(account)} "

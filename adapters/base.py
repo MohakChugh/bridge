@@ -22,8 +22,11 @@ def get_login_shell_env() -> dict:
         return _LOGIN_ENV_CACHE
 
     try:
+        # Use -i (interactive) not just -l (login) because .zshrc
+        # is only sourced for interactive shells. Toolbox, cargo, etc.
+        # are typically added in .zshrc, not .zprofile.
         result = subprocess.run(
-            ["zsh", "-l", "-c", "env"],
+            ["zsh", "-i", "-c", "env"],
             capture_output=True, text=True, timeout=10,
             env={"HOME": os.path.expanduser("~"), "PATH": "/usr/bin:/bin"},
         )
