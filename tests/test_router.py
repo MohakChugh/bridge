@@ -46,31 +46,34 @@ def test_tmux_capture_pane():
 
 
 def test_spawn_claude_session_success():
-    with patch("router.subprocess.run") as mock:
-        mock.return_value = MagicMock(
-            returncode=0,
-            stdout='{"result": "I fixed the bug", "session_id": "abc"}',
-            stderr="",
-        )
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = ('{"result": "I fixed the bug", "session_id": "abc"}', "")
+    mock_proc.returncode = 0
+
+    with patch("router.subprocess.Popen", return_value=mock_proc):
         result = spawn_claude_session("fix the bug", "/tmp/project", timeout=60)
         assert result["success"] is True
         assert "fixed" in result["output"].lower()
-        mock.assert_called_once()
-        args = mock.call_args
-        assert args[1]["cwd"] == "/tmp/project"
+        assert result["session_id"] == "abc"
 
 
 def test_spawn_claude_session_timeout():
-    with patch("router.subprocess.run") as mock:
-        mock.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=60)
+    mock_proc = MagicMock()
+    mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=60)
+    mock_proc.kill = MagicMock()
+
+    with patch("router.subprocess.Popen", return_value=mock_proc):
         result = spawn_claude_session("do something", "/tmp", timeout=60)
         assert result["success"] is False
         assert "timed out" in result["error"].lower()
 
 
 def test_spawn_claude_session_error():
-    with patch("router.subprocess.run") as mock:
-        mock.return_value = MagicMock(returncode=1, stdout="", stderr="something broke")
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = ("", "something broke")
+    mock_proc.returncode = 1
+
+    with patch("router.subprocess.Popen", return_value=mock_proc):
         result = spawn_claude_session("do something", "/tmp", timeout=60)
         assert result["success"] is False
         assert "something broke" in result["error"]

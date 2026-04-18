@@ -118,35 +118,41 @@ def _extract_session_id(output: str) -> Optional[str]:
     return None
 
 
-def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_session_id: Optional[str] = None) -> dict:
+def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_session_id: Optional[str] = None, process_holder: object = None) -> dict:
     """Spawn a new claude -p session (or resume existing) and capture output."""
     try:
-        # Build the claude command
         brief_instruction = "You are replying via iMessage text. Respond like a WhatsApp or text message — casual, short, plain text. No markdown ever (no backticks, asterisks, hashes, bullets, code blocks). Just natural conversational text like you are texting a friend who asked for help. If sharing code or commands, just write them inline as plain text. Keep it brief but complete."
         claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions --append-system-prompt " + _shell_quote(brief_instruction)
         if resume_session_id:
             claude_cmd += " --resume " + _shell_quote(resume_session_id)
-        # Wrap in zsh login shell so it inherits full PATH, aliases,
-        # env vars from .zshrc/.zprofile (brazil, ada, toolbox, etc.)
-        result = subprocess.run(
+
+        proc = subprocess.Popen(
             ["zsh", "-l", "-c", claude_cmd],
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
-        if result.returncode == 0:
-            summary = _extract_summary(result.stdout)
-            session_id = _extract_session_id(result.stdout)
+        # Store process handle for /cancel support
+        if process_holder and hasattr(process_holder, '_active_process'):
+            process_holder._active_process = proc
+
+        stdout, stderr = proc.communicate(timeout=timeout)
+
+        if proc.returncode == 0:
+            summary = _extract_summary(stdout)
+            session_id = _extract_session_id(stdout)
             return {"success": True, "output": summary, "error": "", "session_id": session_id}
         else:
             return {
                 "success": False,
                 "output": "",
-                "error": result.stderr[:200] or f"exit code {result.returncode}",
+                "error": stderr[:200] or f"exit code {proc.returncode}",
                 "session_id": None,
             }
     except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
         return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
     except FileNotFoundError:
         return {"success": False, "output": "", "error": "claude CLI not found in PATH", "session_id": None}
