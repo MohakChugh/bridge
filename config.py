@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "adapters": {
         "claude": {"effort": "max"},
         "wasabi": {"account": "YOUR_ACCT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},
+        "kiro": {"model": "claude-opus-4.7"},
     },
 }
 

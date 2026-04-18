@@ -15,8 +15,10 @@ def _register_defaults():
         return
     from .claude_adapter import ClaudeAdapter
     from .wasabi_adapter import WasabiAdapter
+    from .kiro_adapter import KiroAdapter
     _ADAPTERS["claude"] = ClaudeAdapter()
     _ADAPTERS["wasabi"] = WasabiAdapter()
+    _ADAPTERS["kiro"] = KiroAdapter()
 
 
 def get_adapter(name: str) -> "BaseAdapter":
