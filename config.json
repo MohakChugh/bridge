@@ -1,0 +1,21 @@
+{
+  "poll_interval": 1.0,
+  "directories": {
+    "default": "/Volumes/workspace/",
+    "centralis": "/Volumes/workspace/Nexus/MyBackendService/src",
+    "frontend": "/Users/chumohak/workspace/Nexus/MyFrontendModule/src",
+    "nexus": "/Volumes/workspace/Nexus/",
+    "home": "/Users/chumohak/"
+  },
+  "tmux_session": "claude-session",
+  "self_addresses": [
+    "+1XXXXXXXXXX",
+    "user@example.com"
+  ],
+  "reply_chat_guid": "any;-;+1XXXXXXXXXX",
+  "claude_p_timeout": 600,
+  "idle_stabilization_checks": 2,
+  "idle_check_interval": 5,
+  "max_poll_timeout": 600,
+  "echo_window_seconds": 15
+}

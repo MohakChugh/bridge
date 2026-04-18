@@ -55,9 +55,23 @@ class Daemon:
             self._try_notify_fda_error()
             sys.exit(1)
 
-        # Detect self addresses
-        if not self.config.get("self_addresses"):
-            self.config["self_addresses"] = list(self.chatdb.self_addresses)
+        # Detect self addresses — include both message.account emails AND
+        # handle IDs (phone numbers) from the self-chat conversation
+        if not self.config.get("self_addresses") or len(self.config["self_addresses"]) <= 1:
+            addrs = set(self.chatdb.self_addresses)
+            # Also add handles from self-chat (phone number may differ from email)
+            guid = self.config.get("reply_chat_guid") or self.chatdb.find_self_chat_guid()
+            if guid:
+                handles = self.chatdb.conn.execute(
+                    "SELECT DISTINCT h.id FROM handle h "
+                    "JOIN chat_handle_join chj ON chj.handle_id = h.ROWID "
+                    "JOIN chat c ON c.ROWID = chj.chat_id "
+                    "WHERE c.guid = ?", (guid,)
+                ).fetchall()
+                for h in handles:
+                    if h["id"]:
+                        addrs.add(h["id"].lower())
+            self.config["self_addresses"] = list(addrs)
             log.info(f"Detected self addresses: {self.config['self_addresses']}")
             save_config(CONFIG_PATH, self.config)
 
