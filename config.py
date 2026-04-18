@@ -12,7 +12,6 @@ DEFAULT_CONFIG = {
         "nexus": "/Volumes/workspace/Nexus/",
         "home": "/Users/chumohak/",
     },
-    "tmux_session": "claude-session",
     "self_addresses": [],
     "reply_chat_guid": None,
     "claude_p_timeout": 18000,

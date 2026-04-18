@@ -15,7 +15,7 @@ def test_load_config_defaults_when_missing():
         cfg = load_config(path)
         assert cfg["poll_interval"] == 1.0
         assert cfg["directories"]["default"] == "/Volumes/workspace/"
-        assert cfg["tmux_session"] == "claude-session"
+        assert cfg["cli_tool"] == "claude"
 
 
 def test_load_config_reads_existing():

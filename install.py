@@ -11,11 +11,7 @@ HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, ".claude", "imessage-bridge")
 PLIST_DST = os.path.join(HOME, "Library", "LaunchAgents", "com.claude.imessage-bridge.plist")
 MCP_JSON = os.path.join(HOME, ".claude", ".mcp.json")
-ZSHRC = os.path.join(HOME, ".zshrc")
 CLAUDE_MD = os.path.join(HOME, ".claude", "CLAUDE.md")
-
-ALIAS_LINE = "alias claude='tmux new-session -A -s claude-session -- command claude'"
-ALIAS_COMMENT = "# iMessage Bridge — Claude Code in tmux for iMessage injection"
 
 CLAUDE_MD_SECTION = """
 ## iMessage Bridge
@@ -35,10 +31,8 @@ those are normal terminal interactions.
 
 
 def check_prerequisites():
-    """Check that tmux and pip packages are available."""
+    """Check that required tools are available."""
     errors = []
-    if shutil.which("tmux") is None:
-        errors.append("tmux not found. Install with: brew install tmux")
     if shutil.which("claude") is None:
         errors.append("claude CLI not found in PATH")
     try:
@@ -121,19 +115,6 @@ def install_mcp_json():
     print(f"  Registered MCP server in {MCP_JSON}")
 
 
-def install_alias():
-    """Add tmux alias to .zshrc if not already present."""
-    if os.path.exists(ZSHRC):
-        with open(ZSHRC) as f:
-            content = f.read()
-        if ALIAS_LINE in content:
-            print("  Alias already in .zshrc")
-            return
-    with open(ZSHRC, "a") as f:
-        f.write(f"\n{ALIAS_COMMENT}\n{ALIAS_LINE}\n")
-    print(f"  Added alias to {ZSHRC}")
-
-
 def install_claude_md():
     """Add iMessage Bridge section to CLAUDE.md if not present."""
     if os.path.exists(CLAUDE_MD):
@@ -168,10 +149,7 @@ def main():
     print("3. Registering MCP server...")
     install_mcp_json()
 
-    print("4. Adding shell alias...")
-    install_alias()
-
-    print("5. Updating CLAUDE.md...")
+    print("4. Updating CLAUDE.md...")
     install_claude_md()
 
     print("\n" + "=" * 40)

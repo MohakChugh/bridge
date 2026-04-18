@@ -7,7 +7,6 @@
     "nexus": "/Volumes/workspace/Nexus/",
     "home": "/Users/chumohak/"
   },
-  "tmux_session": "claude-session",
   "self_addresses": [
     "+1XXXXXXXXXX",
     "user@example.com"
@@ -18,7 +17,7 @@
   "idle_check_interval": 5,
   "max_poll_timeout": 600,
   "echo_window_seconds": 15,
-  "cli_tool": "wasabi",
+  "cli_tool": "claude",
   "adapters": {
     "claude": {
       "effort": "max"
