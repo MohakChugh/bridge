@@ -27,13 +27,14 @@ LOG_PATH = os.path.join(BASE_DIR, "logs", "daemon.log")
 CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
 
 # Logging with rotation (5MB max, keep 3 backups)
+# Only use file handler — launchd already captures stderr to the same file,
+# so a StreamHandler would duplicate every line.
 os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=3),
-        logging.StreamHandler(sys.stderr),
     ],
 )
 log = logging.getLogger("imessage-bridge")
