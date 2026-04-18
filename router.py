@@ -1,5 +1,7 @@
 """Route messages: tmux injection or claude -p subprocess spawn."""
 
+from __future__ import annotations
+from typing import Optional
 import json
 import re
 import subprocess
@@ -91,33 +93,45 @@ def _extract_pane_summary(pane_output: str, max_chars: int = 500) -> str:
     return text
 
 
-def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600) -> dict:
-    """Spawn a new claude -p session and capture output."""
+def _extract_session_id(output: str) -> Optional[str]:
+    """Extract session_id from claude -p JSON output."""
     try:
-        # Inherit full environment so Bedrock/AWS auth works
-        import os
-        env = os.environ.copy()
+        data = json.loads(output)
+        if isinstance(data, dict):
+            return data.get("session_id")
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
+def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_session_id: Optional[str] = None) -> dict:
+    """Spawn a new claude -p session (or resume existing) and capture output."""
+    try:
+        cmd = ["claude", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
+        if resume_session_id:
+            cmd.extend(["--resume", resume_session_id])
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
+            cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=env,
         )
         if result.returncode == 0:
             summary = _extract_summary(result.stdout)
-            return {"success": True, "output": summary, "error": ""}
+            session_id = _extract_session_id(result.stdout)
+            return {"success": True, "output": summary, "error": "", "session_id": session_id}
         else:
             return {
                 "success": False,
                 "output": "",
                 "error": result.stderr[:200] or f"exit code {result.returncode}",
+                "session_id": None,
             }
     except subprocess.TimeoutExpired:
-        return {"success": False, "output": "", "error": f"Timed out after {timeout}s"}
+        return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
     except FileNotFoundError:
-        return {"success": False, "output": "", "error": "claude CLI not found in PATH"}
+        return {"success": False, "output": "", "error": "claude CLI not found in PATH", "session_id": None}
 
 
 def inject_into_session(

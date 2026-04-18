@@ -92,6 +92,12 @@ class Daemon:
             save_state(STATE_PATH, self.state)
             log.info(f"Initialized watermark to {self.state['watermark']}")
 
+        # Active session tracking for persistent conversations
+        self.active_session_id = self.state.get("active_session_id")
+        self.active_session_cwd = self.state.get("active_session_cwd")
+        if self.active_session_id:
+            log.info(f"Resuming active session: {self.active_session_id}")
+
         log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
 
     def _try_notify_fda_error(self):
@@ -140,6 +146,11 @@ class Daemon:
 
         log.info(f"New message: {text[:80]}...")
 
+        # Handle /end command — ends active session
+        if text.strip().lower() == "/end":
+            self._handle_end()
+            return
+
         parsed = parse_prefix(text)
         if parsed is None:
             return
@@ -147,10 +158,33 @@ class Daemon:
         if parsed["action"] == "spawn":
             self._handle_spawn(parsed)
         elif parsed["action"] == "inject":
-            self._handle_inject(parsed)
+            # "inject" = no prefix. If active session exists, continue it.
+            # If no active session, tell user to start one.
+            self._handle_continue(parsed)
+
+    def _handle_end(self) -> None:
+        """End the active persistent session."""
+        if self.active_session_id:
+            log.info(f"Ending session: {self.active_session_id}")
+            self.active_session_id = None
+            self.active_session_cwd = None
+            self.state["active_session_id"] = None
+            self.state["active_session_cwd"] = None
+            save_state(STATE_PATH, self.state)
+            self._reply("Session ended.")
+        else:
+            self._reply("No active session to end.")
+
+    def _save_active_session(self, session_id: str, cwd: str) -> None:
+        """Save active session to state for persistence across daemon restarts."""
+        self.active_session_id = session_id
+        self.active_session_cwd = cwd
+        self.state["active_session_id"] = session_id
+        self.state["active_session_cwd"] = cwd
+        save_state(STATE_PATH, self.state)
 
     def _handle_spawn(self, parsed: dict) -> None:
-        """Spawn a new claude -p session."""
+        """Spawn a new claude -p session (ends any existing session)."""
         alias = parsed["directory_alias"]
         prompt = parsed["prompt"]
         cwd = self.config["directories"].get(alias, self.config["directories"]["default"])
@@ -158,6 +192,10 @@ class Daemon:
         if not os.path.isdir(cwd):
             self._reply(f"Directory not found: {cwd}")
             return
+
+        # End any existing session before starting new one
+        if self.active_session_id:
+            log.info(f"Ending previous session {self.active_session_id} for new session")
 
         self._reply(f"Starting new session in {alias}...")
         log.info(f"Spawning claude -p in {cwd}: {prompt[:60]}")
@@ -169,30 +207,39 @@ class Daemon:
         )
 
         if result["success"]:
+            if result.get("session_id"):
+                self._save_active_session(result["session_id"], cwd)
+                log.info(f"Active session: {result['session_id']}")
             self._reply(f"Done: {result['output']}")
         else:
             self._reply(f"Error: {result['error']}")
 
-    def _handle_inject(self, parsed: dict) -> None:
-        """Inject into running tmux Claude session."""
+    def _handle_continue(self, parsed: dict) -> None:
+        """Continue the active persistent session, or report no session."""
         prompt = parsed["prompt"]
-        session = self.config.get("tmux_session", "claude-session")
 
-        self._reply("Injecting into active session...")
-        log.info(f"Injecting into {session}: {prompt[:60]}")
+        if not self.active_session_id:
+            self._reply("No active session. Use 'new:' prefix to start one, or /end to stop.")
+            return
 
-        result = inject_into_session(
-            session_name=session,
+        cwd = self.active_session_cwd or self.config["directories"]["default"]
+        log.info(f"Continuing session {self.active_session_id}: {prompt[:60]}")
+        self._reply("Processing...")
+
+        result = spawn_claude_session(
             prompt=prompt,
-            check_interval=self.config.get("idle_check_interval", 5),
-            stabilization_checks=self.config.get("idle_stabilization_checks", 2),
-            max_timeout=self.config.get("max_poll_timeout", 600),
+            cwd=cwd,
+            timeout=self.config.get("claude_p_timeout", 600),
+            resume_session_id=self.active_session_id,
         )
 
         if result["success"]:
-            self._reply(result["output"])
+            # Update session_id in case it changed
+            if result.get("session_id"):
+                self._save_active_session(result["session_id"], cwd)
+            self._reply(f"{result['output']}")
         else:
-            self._reply(result["error"])
+            self._reply(f"Error: {result['error']}")
 
     def poll(self) -> None:
         """Single poll cycle — check for new messages."""
