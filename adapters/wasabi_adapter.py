@@ -30,6 +30,16 @@ class WasabiAdapter(BaseAdapter):
         return "wasabi"
 
     def is_available(self) -> bool:
+        import os
+        # Check known paths directly — toolbox doesn't always appear in zsh -l PATH
+        known_paths = [
+            os.path.expanduser("~/.toolbox/bin/wasabi"),
+            "/opt/homebrew/bin/wasabi",
+            "/usr/local/bin/wasabi",
+        ]
+        for p in known_paths:
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return True
         try:
             r = subprocess.run(["zsh", "-l", "-c", "which wasabi"], capture_output=True, text=True, timeout=10)
             return r.returncode == 0
@@ -54,8 +64,10 @@ class WasabiAdapter(BaseAdapter):
             # Prepend brief instruction since wasabi has no --append-system-prompt
             full_prompt = BRIEF_PREFIX + prompt
 
+            # Use full path — toolbox may not be in launchd's PATH
+            wasabi_bin = self._find_wasabi_path()
             parts = [
-                "wasabi",
+                wasabi_bin,
                 "--disable-initial-workspace-summary",
                 "--auto-accept-edits",
                 "--dangerously-accept-all-prompts",
@@ -117,6 +129,19 @@ class WasabiAdapter(BaseAdapter):
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _find_wasabi_path() -> str:
+        """Find wasabi binary path."""
+        import os
+        for p in [
+            os.path.expanduser("~/.toolbox/bin/wasabi"),
+            "/opt/homebrew/bin/wasabi",
+            "/usr/local/bin/wasabi",
+        ]:
+            if os.path.isfile(p):
+                return p
+        return "wasabi"  # fallback to PATH lookup
 
     def _extract_response(self, raw_output: str) -> str:
         """Extract actual response from wasabi's noisy output."""
