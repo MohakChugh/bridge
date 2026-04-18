@@ -205,7 +205,8 @@ class Daemon:
 
         text = msg["text"]
 
-        # Check for voice memo attachment (even if text is empty)
+        # Check for voice memo attachment FIRST (before text processing)
+        # iMessage voice memos have text=\ufffc (object replacement char) or empty
         if msg.get("has_attachments"):
             try:
                 attachments = self.chatdb.get_attachments(msg["rowid"])
@@ -214,12 +215,14 @@ class Daemon:
                         filepath = att.get("filename", "")
                         if filepath:
                             filepath = os.path.expanduser(filepath)
+                            log.info(f"Voice memo detected: {filepath}")
                             self._handle_voice_attachment(filepath)
                             return
             except Exception as e:
                 log.warning(f"Attachment check failed: {e}")
 
-        if not text or not text.strip():
+        # Treat U+FFFC (object replacement) as empty — used by iMessage for attachment-only messages
+        if not text or not text.strip() or text.strip() == "\ufffc":
             return
         if OUTBOUND_MARKER in text:
             return

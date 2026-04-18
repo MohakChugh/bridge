@@ -13,7 +13,11 @@ from typing import Optional
 log = logging.getLogger("imessage-bridge")
 
 AUDIO_MIME_TYPES = {"audio/mp4", "audio/m4a", "audio/x-m4a", "audio/wav", "audio/mpeg", "audio/caf"}
-AUDIO_UTIS = {"com.apple.m4a-audio", "public.mp3", "com.microsoft.waveform-audio", "public.audio"}
+AUDIO_UTIS = {
+    "com.apple.m4a-audio", "com.apple.coreaudio-format",  # iMessage voice memos use CAF
+    "public.mp3", "public.audio", "public.wav-audio",
+    "com.microsoft.waveform-audio",
+}
 
 
 def is_audio_attachment(mime_type: Optional[str], uti: Optional[str]) -> bool:
