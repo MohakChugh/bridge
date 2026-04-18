@@ -16,7 +16,8 @@ def test_send_imessage_calls_osascript():
         mock_run.assert_called_once()
         args = mock_run.call_args
         assert args[0][0][0] == "osascript"
-        assert "Hello from test" in args[0][0]
+        # Text has invisible marker appended
+        assert any("Hello from test" in str(a) for a in args[0][0])
         assert "chat-guid-123" in args[0][0]
 
 

@@ -18,7 +18,7 @@ from config import load_config, save_config, load_state, save_state
 from echo_filter import EchoFilter
 from parser import parse_prefix
 from router import inject_into_session, spawn_claude_session
-from sender import send_imessage
+from sender import send_imessage, OUTBOUND_MARKER
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -140,15 +140,23 @@ class Daemon:
         if not text or not text.strip():
             return
 
+        # Skip messages we sent (identified by invisible marker)
+        if OUTBOUND_MARKER in text:
+            return
+
         chat_guid = msg["chat_guid"]
         if self.echo_filter.is_echo(chat_guid, text):
             return
 
         log.info(f"New message: {text[:80]}...")
 
-        # Handle /end command — ends active session
-        if text.strip().lower() == "/end":
+        # Handle commands
+        cmd = text.strip().lower()
+        if cmd == "/end":
             self._handle_end()
+            return
+        if cmd == "/status":
+            self._handle_status()
             return
 
         parsed = parse_prefix(text)
@@ -174,6 +182,13 @@ class Daemon:
             self._reply("Session ended.")
         else:
             self._reply("No active session to end.")
+
+    def _handle_status(self) -> None:
+        """Report current status briefly."""
+        if self.active_session_id:
+            self._reply(f"Session active in {self.active_session_cwd or 'unknown'}")
+        else:
+            self._reply("No active session.")
 
     def _save_active_session(self, session_id: str, cwd: str) -> None:
         """Save active session to state for persistence across daemon restarts."""
