@@ -7,6 +7,7 @@ import json
 import logging
 import logging.handlers
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -73,7 +74,9 @@ HELP_TEXT = (
     "\n"
     "Productivity:\n"
     "/queue <prompt> - run after current task\n"
-    "/remind <time> <msg> - timed reminder (5m, 1h, 2h30m)\n"
+    "/remind <natural language> - reminder (LLM parses time)\n"
+    "/remind list - show pending reminders\n"
+    "/remind cancel <N> - cancel reminder\n"
     "/help - this message\n"
     "\n"
     "Start: new:<dir>: <prompt>\n"
@@ -155,6 +158,9 @@ class Daemon:
         # Schedule confirm flow
         self._awaiting_schedule_confirm = False
         self._pending_schedule: Optional[dict] = None
+        # Remind confirm flow
+        self._awaiting_remind_confirm = False
+        self._pending_remind: Optional[dict] = None
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
@@ -227,6 +233,9 @@ class Daemon:
         # Intercept confirm flows before normal routing
         if self._awaiting_voice_confirm:
             self._handle_voice_confirm(text.strip().lower())
+            return
+        if self._awaiting_remind_confirm:
+            self._handle_remind_confirm(text.strip().lower())
             return
         if self._awaiting_schedule_confirm:
             self._handle_schedule_confirm(text.strip().lower())
@@ -606,19 +615,135 @@ class Daemon:
         self._reply(msg)
 
     def _cmd_remind(self, args: str) -> None:
+        """Natural language reminders — LLM parses time, you confirm."""
+        if not args or args == "help":
+            self._reply(
+                "/remind <natural language> - set reminder\n"
+                "/remind list - show pending reminders\n"
+                "/remind cancel <N> - cancel by number\n"
+                "/remind cancel all - cancel all\n"
+                "Examples: /remind tomorrow 9am check deploy\n"
+                "  /remind in 30 minutes call John\n"
+                "  /remind friday evening review PR"
+            )
+            return
+
+        if args == "list":
+            reminders = self.state.get("reminders", [])
+            if not reminders:
+                self._reply("No pending reminders.")
+                return
+            lines = ["Pending reminders:"]
+            for i, r in enumerate(reminders, 1):
+                from datetime import datetime
+                dt = datetime.fromtimestamp(r["fire_at"])
+                lines.append(f"  {i}. {dt.strftime('%b %d %I:%M %p')} — {r['message'][:40]}")
+            self._reply("\n".join(lines))
+            return
+
+        if args.startswith("cancel "):
+            val = args[7:].strip()
+            reminders = self.state.get("reminders", [])
+            if val == "all":
+                count = len(reminders)
+                self.state["reminders"] = []
+                self._reminders = []
+                save_state(STATE_PATH, self.state)
+                self._reply(f"All {count} reminder(s) cancelled.")
+                return
+            try:
+                idx = int(val) - 1
+                if 0 <= idx < len(reminders):
+                    removed = reminders.pop(idx)
+                    self._reminders = [r for r in self._reminders if r.get("message") != removed.get("message")]
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Reminder #{idx+1} cancelled.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /remind cancel <N> or /remind cancel all")
+            return
+
+        # Try simple relative time first (backward compat: /remind 5m check build)
         parts = args.split(None, 1)
-        if len(parts) < 2:
-            self._reply("Usage: /remind <time> <message>\nTime: 5m, 1h, 30s")
-            return
-        time_str, message = parts
-        seconds = self._parse_time(time_str)
-        if seconds is None:
-            self._reply("Bad time format. Use: 5m, 1h, 30s, 2h30m")
-            return
-        fire_at = time.time() + seconds
-        self._reminders.append({"fire_at": fire_at, "message": message})
-        self._reply(f"Reminder set for {time_str}.")
-        log.info(f"Reminder in {seconds}s: {message[:40]}")
+        if len(parts) >= 2:
+            seconds = self._parse_time(parts[0])
+            if seconds is not None:
+                fire_at = time.time() + seconds
+                reminder = {"fire_at": fire_at, "message": parts[1]}
+                self._reminders.append(reminder)
+                self.state.setdefault("reminders", []).append(reminder)
+                save_state(STATE_PATH, self.state)
+                self._reply(f"Reminder set for {parts[0]}.")
+                return
+
+        # Natural language → LLM parse → confirm
+        self._reply("Parsing reminder...")
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+
+        def _parse():
+            parsed = self._parse_remind_via_llm(args, env)
+            if parsed:
+                self._pending_remind = parsed
+                self._awaiting_remind_confirm = True
+                self._reply(f'Parsed: {parsed["human"]} — "{parsed["message"]}". Confirm? (y/n)')
+            else:
+                self._reply("Could not parse. Try: /remind tomorrow 9am check deploy")
+
+        threading.Thread(target=_parse, daemon=True).start()
+
+    def _parse_remind_via_llm(self, natural_text: str, env: dict) -> Optional[dict]:
+        """Use Claude to parse natural language reminder into timestamp."""
+        from datetime import datetime
+        now = datetime.now()
+        prompt = (
+            f"Parse this reminder into a specific date and time. "
+            f"Current time: {now.strftime('%Y-%m-%d %H:%M %A')}. "
+            f"Input: {natural_text}. "
+            f"Reply ONLY with valid JSON: "
+            f'{{\"iso\": \"YYYY-MM-DDTHH:MM:SS\", \"human\": \"readable description\", \"message\": \"the reminder message\"}}. '
+            f"Separate the TIME part from the MESSAGE part."
+        )
+        try:
+            result = subprocess.run(
+                ["zsh", "-i", "-c",
+                 f"claude -p {shlex.quote(prompt)} "
+                 f"--output-format json --dangerously-skip-permissions --effort low"],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            if result.returncode == 0:
+                import json as _json
+                outer = _json.loads(result.stdout)
+                text = outer.get("result", "")
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    parsed = _json.loads(text[start:end])
+                    if "iso" in parsed and "message" in parsed:
+                        dt = datetime.fromisoformat(parsed["iso"])
+                        parsed["fire_at"] = dt.timestamp()
+                        return parsed
+        except Exception as e:
+            log.warning(f"Remind LLM parse failed: {e}")
+        return None
+
+    def _handle_remind_confirm(self, reply: str) -> None:
+        self._awaiting_remind_confirm = False
+        if reply in ("y", "yes"):
+            remind = self._pending_remind
+            if not remind:
+                return
+            reminder = {"fire_at": remind["fire_at"], "message": remind["message"]}
+            self._reminders.append(reminder)
+            self.state.setdefault("reminders", []).append(reminder)
+            save_state(STATE_PATH, self.state)
+            from datetime import datetime
+            dt = datetime.fromtimestamp(remind["fire_at"])
+            self._reply(f'Reminder set: {dt.strftime("%b %d %I:%M %p")} — {remind["message"][:40]}')
+        else:
+            self._reply("Reminder cancelled.")
+        self._pending_remind = None
 
     @staticmethod
     def _parse_time(s: str) -> Optional[float]:
@@ -836,7 +961,12 @@ class Daemon:
             self._reply("Voice prompt cancelled.")
 
     def _reminder_loop(self) -> None:
-        """Background thread that fires reminders."""
+        """Background thread that fires reminders (in-memory + persisted)."""
+        # Load persisted reminders on startup
+        for r in self.state.get("reminders", []):
+            if r not in self._reminders and r.get("fire_at", 0) > time.time():
+                self._reminders.append(r)
+
         while self.running:
             now = time.time()
             fired = []
@@ -845,7 +975,12 @@ class Daemon:
                     self._reply(f"Reminder: {r['message']}")
                     fired.append(r)
             for r in fired:
-                self._reminders.remove(r)
+                if r in self._reminders:
+                    self._reminders.remove(r)
+                # Remove from persisted state too
+                persisted = self.state.get("reminders", [])
+                self.state["reminders"] = [p for p in persisted if p.get("fire_at") != r.get("fire_at") or p.get("message") != r.get("message")]
+                save_state(STATE_PATH, self.state)
             time.sleep(5)
 
     # --- Session Handlers ---

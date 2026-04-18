@@ -321,18 +321,37 @@ class TestCmdTool:
 # --- /remind ---
 
 class TestCmdRemind:
-    def test_remind_valid(self):
+    def _add_remind_attrs(self, d):
+        d._awaiting_remind_confirm = False
+        d._pending_remind = None
+        d._progress_tracker = None
+        d._stuck_detector = None
+
+    def test_remind_valid_relative(self):
         d, replies = make_daemon()
-        d._cmd_remind("5m check build")
+        self._add_remind_attrs(d)
+        with patch("daemon.save_state"):
+            d._cmd_remind("5m check build")
         assert len(d._reminders) == 1
         assert "Reminder set" in replies[0]
 
-    def test_remind_bad_time(self):
+    def test_remind_list_empty(self):
         d, replies = make_daemon()
-        d._cmd_remind("abc check build")
-        assert "Bad time format" in replies[0]
+        self._add_remind_attrs(d)
+        d._cmd_remind("list")
+        assert "No pending" in replies[0]
 
-    def test_remind_missing_message(self):
+    def test_remind_help(self):
         d, replies = make_daemon()
-        d._cmd_remind("5m")
-        assert "Usage:" in replies[0]
+        self._add_remind_attrs(d)
+        d._cmd_remind("help")
+        assert "/remind" in replies[0]
+
+    def test_remind_cancel_all(self):
+        d, replies = make_daemon()
+        self._add_remind_attrs(d)
+        d.state["reminders"] = [{"fire_at": 999999999999, "message": "test"}]
+        d._reminders = [{"fire_at": 999999999999, "message": "test"}]
+        with patch("daemon.save_state"):
+            d._cmd_remind("cancel all")
+        assert "cancelled" in replies[0].lower()
