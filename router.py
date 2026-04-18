@@ -61,7 +61,7 @@ def poll_until_idle(
     return prev_snapshot
 
 
-def _extract_summary(output: str, max_chars: int = 100) -> str:
+def _extract_summary(output: str, max_chars: int = 0) -> str:
     """Extract a readable summary from claude -p JSON output."""
     try:
         data = json.loads(output)
@@ -74,10 +74,18 @@ def _extract_summary(output: str, max_chars: int = 100) -> str:
     except (json.JSONDecodeError, TypeError):
         text = output
 
+    # Strip ANSI codes and markdown formatting
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    text = re.sub(r"```[\s\S]*?```", "", text)  # code blocks
+    text = re.sub(r"`([^`]+)`", r"\1", text)     # inline code
+    text = re.sub(r"#{1,6}\s+", "", text)         # headers
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)  # bold
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)      # italic
+    text = re.sub(r"^[-*]\s+", "", text, flags=re.MULTILINE)  # bullets
+    text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)  # numbered lists
     text = text.strip()
 
-    if len(text) > max_chars:
+    if max_chars > 0 and len(text) > max_chars:
         return text[:max_chars - 3] + "..."
     return text
 
@@ -114,7 +122,7 @@ def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_sessi
     """Spawn a new claude -p session (or resume existing) and capture output."""
     try:
         # Build the claude command
-        brief_instruction = "Reply in 15 words max. No markdown, no formatting, no bullet points, no code blocks. Plain text only. Be extremely brief."
+        brief_instruction = "CRITICAL: Your response will be shown in Apple iMessage which does NOT render markdown. Never use markdown syntax: no backticks, no asterisks for bold/italic, no # headers, no bullet points with - or *, no numbered lists, no code blocks with triple backticks. Write plain text only. Use short sentences. Keep responses concise but complete - do not truncate."
         claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions --append-system-prompt " + _shell_quote(brief_instruction)
         if resume_session_id:
             claude_cmd += " --resume " + _shell_quote(resume_session_id)
