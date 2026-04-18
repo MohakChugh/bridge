@@ -2,6 +2,14 @@
 
 Control Claude Code from your iPhone via iMessage. Text yourself a prompt, get a response back as a text message. Persistent sessions, task queuing, directory switching — all from your phone.
 
+## Demo
+
+### Starting a session and getting responses
+![Demo 1](assets/demo-1.gif)
+
+### Multi-turn conversation
+![Demo 2](assets/demo-2.gif)
+
 ## How It Works
 
 A Python daemon runs on your Mac and watches `~/Library/Messages/chat.db` for new self-chat messages (you texting yourself). When a message arrives, it routes to Claude Code via `claude -p` and sends the response back via iMessage through AppleScript.
