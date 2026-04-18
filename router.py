@@ -122,7 +122,7 @@ def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_sessi
     """Spawn a new claude -p session (or resume existing) and capture output."""
     try:
         brief_instruction = "You are replying via iMessage text. Respond like a WhatsApp or text message — casual, short, plain text. No markdown ever (no backticks, asterisks, hashes, bullets, code blocks). Just natural conversational text like you are texting a friend who asked for help. If sharing code or commands, just write them inline as plain text. Keep it brief but complete."
-        claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions --append-system-prompt " + _shell_quote(brief_instruction)
+        claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions --effort max --append-system-prompt " + _shell_quote(brief_instruction)
         if resume_session_id:
             claude_cmd += " --resume " + _shell_quote(resume_session_id)
 
