@@ -15,7 +15,7 @@ DEFAULT_CONFIG = {
     "tmux_session": "claude-session",
     "self_addresses": [],
     "reply_chat_guid": None,
-    "claude_p_timeout": 600,
+    "claude_p_timeout": 18000,
     "idle_stabilization_checks": 2,
     "idle_check_interval": 5,
     "max_poll_timeout": 600,
