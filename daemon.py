@@ -8,6 +8,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 import time
 
 # Add project directory to path for imports
@@ -95,6 +96,8 @@ class Daemon:
         # Active session tracking for persistent conversations
         self.active_session_id = self.state.get("active_session_id")
         self.active_session_cwd = self.state.get("active_session_cwd")
+        self._busy = False  # True while claude -p is running
+        self._current_task = None  # Brief description of current work
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
@@ -163,12 +166,14 @@ class Daemon:
         if parsed is None:
             return
 
+        if self._busy:
+            self._reply("Busy. Wait or send /status.")
+            return
+
         if parsed["action"] == "spawn":
-            self._handle_spawn(parsed)
+            threading.Thread(target=self._handle_spawn, args=(parsed,), daemon=True).start()
         elif parsed["action"] == "inject":
-            # "inject" = no prefix. If active session exists, continue it.
-            # If no active session, tell user to start one.
-            self._handle_continue(parsed)
+            threading.Thread(target=self._handle_continue, args=(parsed,), daemon=True).start()
 
     def _handle_end(self) -> None:
         """End the active persistent session."""
@@ -185,10 +190,12 @@ class Daemon:
 
     def _handle_status(self) -> None:
         """Report current status briefly."""
-        if self.active_session_id:
-            self._reply(f"Session active in {self.active_session_cwd or 'unknown'}")
+        if self._busy and self._current_task:
+            self._reply(f"Working on: {self._current_task}")
+        elif self.active_session_id:
+            self._reply(f"Idle. Session active.")
         else:
-            self._reply("No active session.")
+            self._reply("Idle. No session.")
 
     def _save_active_session(self, session_id: str, cwd: str) -> None:
         """Save active session to state for persistence across daemon restarts."""
@@ -212,22 +219,29 @@ class Daemon:
         if self.active_session_id:
             log.info(f"Ending previous session {self.active_session_id} for new session")
 
-        self._reply(f"On it.")
-        log.info(f"Spawning claude -p in {cwd}: {prompt[:60]}")
+        short = prompt[:60] + ("..." if len(prompt) > 60 else "")
+        self._busy = True
+        self._current_task = short
+        self._reply("On it.")
+        log.info(f"Spawning claude -p in {cwd}: {short}")
 
-        result = spawn_claude_session(
-            prompt=prompt,
-            cwd=cwd,
-            timeout=self.config.get("claude_p_timeout", 600),
-        )
+        try:
+            result = spawn_claude_session(
+                prompt=prompt,
+                cwd=cwd,
+                timeout=self.config.get("claude_p_timeout", 600),
+            )
 
-        if result["success"]:
-            if result.get("session_id"):
-                self._save_active_session(result["session_id"], cwd)
-                log.info(f"Active session: {result['session_id']}")
-            self._reply(result['output'])
-        else:
-            self._reply(f"Failed: {result['error'][:80]}")
+            if result["success"]:
+                if result.get("session_id"):
+                    self._save_active_session(result["session_id"], cwd)
+                    log.info(f"Active session: {result['session_id']}")
+                self._reply(result['output'])
+            else:
+                self._reply(f"Failed: {result['error'][:80]}")
+        finally:
+            self._busy = False
+            self._current_task = None
 
     def _handle_continue(self, parsed: dict) -> None:
         """Continue the active persistent session, or report no session."""
@@ -238,23 +252,29 @@ class Daemon:
             return
 
         cwd = self.active_session_cwd or self.config["directories"]["default"]
-        log.info(f"Continuing session {self.active_session_id}: {prompt[:60]}")
+        short = prompt[:60] + ("..." if len(prompt) > 60 else "")
+        self._busy = True
+        self._current_task = short
         self._reply("On it.")
+        log.info(f"Continuing session {self.active_session_id}: {short}")
 
-        result = spawn_claude_session(
-            prompt=prompt,
-            cwd=cwd,
-            timeout=self.config.get("claude_p_timeout", 600),
-            resume_session_id=self.active_session_id,
-        )
+        try:
+            result = spawn_claude_session(
+                prompt=prompt,
+                cwd=cwd,
+                timeout=self.config.get("claude_p_timeout", 600),
+                resume_session_id=self.active_session_id,
+            )
 
-        if result["success"]:
-            # Update session_id in case it changed
-            if result.get("session_id"):
-                self._save_active_session(result["session_id"], cwd)
-            self._reply(result['output'])
-        else:
-            self._reply(f"Failed: {result['error'][:80]}")
+            if result["success"]:
+                if result.get("session_id"):
+                    self._save_active_session(result["session_id"], cwd)
+                self._reply(result['output'])
+            else:
+                self._reply(f"Failed: {result['error'][:80]}")
+        finally:
+            self._busy = False
+            self._current_task = None
 
     def poll(self) -> None:
         """Single poll cycle — check for new messages."""
