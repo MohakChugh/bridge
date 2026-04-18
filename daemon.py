@@ -21,6 +21,7 @@ from config import load_config, save_config, load_state, save_state
 from echo_filter import EchoFilter
 from parser import parse_prefix
 from adapters import get_adapter, list_adapters
+from progress_tracker import ProgressTracker, StuckDetector
 from sender import send_imessage, OUTBOUND_MARKER
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
@@ -42,6 +43,9 @@ log = logging.getLogger("imessage-bridge")
 HELP_TEXT = (
     "Commands:\n"
     "/status - what's happening now\n"
+    "/eta - task progress, todos, ETA (Claude Code only)\n"
+    "/eta interval 5m - change auto-update interval\n"
+    "/eta stuck 2h - change stuck alert threshold\n"
     "/end - end current session\n"
     "/cancel - kill running task\n"
     "/switch <dir> - switch directory\n"
@@ -50,6 +54,7 @@ HELP_TEXT = (
     "/dirs - show directory aliases\n"
     "/queue <prompt> - run after current task\n"
     "/remind <time> <msg> - send reminder\n"
+    "/tool <name> - switch CLI tool (claude/wasabi/kiro)\n"
     "/help - this message\n"
     "\n"
     "Start session: new:<dir>: <prompt>\n"
@@ -115,6 +120,8 @@ class Daemon:
         self._active_process = None  # For /cancel
         self._task_queue: list[str] = []  # For /queue
         self._reminders: list[dict] = []  # For /remind
+        self._progress_tracker: Optional[ProgressTracker] = None
+        self._stuck_detector: Optional[StuckDetector] = None
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
@@ -205,6 +212,10 @@ class Daemon:
         if cmd_lower.startswith("/tool"):
             arg = cmd[5:].strip()
             self._cmd_tool(arg)
+            return
+        if cmd_lower.startswith("/eta"):
+            arg = cmd[4:].strip()
+            self._cmd_eta(arg)
             return
 
         # Regular message — parse prefix
@@ -348,6 +359,50 @@ class Daemon:
         except KeyError as e:
             self._reply(str(e))
 
+    def _cmd_eta(self, args: str) -> None:
+        """Show task progress, ETA, or configure stuck detection."""
+        if args.startswith("interval "):
+            seconds = self._parse_time(args[9:].strip())
+            if seconds:
+                self.config["eta_auto_interval"] = seconds
+                save_config(CONFIG_PATH, self.config)
+                self._reply(f"Auto-update interval: {args[9:].strip()}")
+            else:
+                self._reply("Bad format. Use: /eta interval 5m")
+            return
+
+        if args.startswith("stuck "):
+            val = args[6:].strip()
+            if val == "off":
+                self.config["stuck_threshold"] = 0
+                save_config(CONFIG_PATH, self.config)
+                self._reply("Stuck detection disabled.")
+                return
+            seconds = self._parse_time(val)
+            if seconds:
+                self.config["stuck_threshold"] = seconds
+                save_config(CONFIG_PATH, self.config)
+                self._reply(f"Stuck threshold: {val}")
+            else:
+                self._reply("Bad format. Use: /eta stuck 2h or /eta stuck off")
+            return
+
+        if args == "stuck":
+            threshold = self.config.get("stuck_threshold", 5400)
+            if threshold == 0:
+                self._reply("Stuck detection: disabled")
+            else:
+                mins = int(threshold // 60)
+                self._reply(f"Stuck threshold: {mins}min. Max alerts: {self.config.get('stuck_max_alerts', 3)}")
+            return
+
+        if not self._busy or not self._progress_tracker:
+            self._reply("Nothing running.")
+            return
+
+        msg = self._progress_tracker.format_eta_message()
+        self._reply(msg)
+
     def _cmd_remind(self, args: str) -> None:
         parts = args.split(None, 1)
         if len(parts) < 2:
@@ -447,7 +502,14 @@ class Daemon:
         self._track_history("user", prompt)
 
         try:
-            adapter = get_adapter(self.config.get("cli_tool", "claude"))
+            tool = self.config.get("cli_tool", "claude")
+            adapter = get_adapter(tool)
+
+            # Start progress tracker (Claude Code only)
+            if tool == "claude":
+                self._progress_tracker = ProgressTracker(session_id=self.active_session_id)
+                self._start_auto_updates()
+
             result = adapter.spawn(
                 prompt=prompt,
                 cwd=cwd,
@@ -463,13 +525,22 @@ class Daemon:
                 elif not self.active_session_id:
                     self._save_active_session("auto", cwd)
                 self._track_history("assistant", result['output'])
-                self._reply(result['output'])
+                # Append completion summary if tracker active
+                output = result['output']
+                if self._progress_tracker:
+                    summary = self._progress_tracker.format_completion_summary()
+                    output = f"{output}\n\n{summary}"
+                self._reply(output)
             else:
                 self._reply(f"Failed: {result['error'][:80]}")
         finally:
             self._busy = False
             self._current_task = None
             self._active_process = None
+            self._progress_tracker = None
+            if self._stuck_detector:
+                self._stuck_detector.reset()
+            self._stuck_detector = None
             self._process_queue()
 
     def _handle_continue(self, parsed: dict) -> None:
@@ -488,7 +559,13 @@ class Daemon:
         self._track_history("user", prompt)
 
         try:
-            adapter = get_adapter(self.config.get("cli_tool", "claude"))
+            tool = self.config.get("cli_tool", "claude")
+            adapter = get_adapter(tool)
+
+            if tool == "claude":
+                self._progress_tracker = ProgressTracker(session_id=self.active_session_id)
+                self._start_auto_updates()
+
             result = adapter.spawn(
                 prompt=prompt,
                 cwd=cwd,
@@ -502,14 +579,94 @@ class Daemon:
                 if result.get("session_id"):
                     self._save_active_session(result["session_id"], cwd)
                 self._track_history("assistant", result['output'])
-                self._reply(result['output'])
+                output = result['output']
+                if self._progress_tracker:
+                    summary = self._progress_tracker.format_completion_summary()
+                    output = f"{output}\n\n{summary}"
+                self._reply(output)
             else:
                 self._reply(f"Failed: {result['error'][:80]}")
         finally:
             self._busy = False
             self._current_task = None
             self._active_process = None
+            self._progress_tracker = None
+            if self._stuck_detector:
+                self._stuck_detector.reset()
+            self._stuck_detector = None
             self._process_queue()
+
+    # --- Auto-Updates & Stuck Detection ---
+
+    def _start_auto_updates(self) -> None:
+        """Start background threads for auto-progress updates and stuck detection."""
+        interval = self.config.get("eta_auto_interval", 900)
+        if interval > 0:
+            threading.Thread(target=self._auto_update_loop, args=(interval,), daemon=True).start()
+
+        threshold = self.config.get("stuck_threshold", 5400)
+        if threshold > 0 and self._active_process:
+            self._stuck_detector = StuckDetector(
+                pid=self._active_process.pid,
+                config=self.config,
+            )
+            threading.Thread(target=self._stuck_check_loop, daemon=True).start()
+
+    def _auto_update_loop(self, interval: float) -> None:
+        """Send periodic progress updates via iMessage."""
+        while self._busy and self._progress_tracker:
+            time.sleep(interval)
+            if self._busy and self._progress_tracker:
+                try:
+                    msg = self._progress_tracker.format_eta_message()
+                    self._reply(f"[Auto] {msg}")
+                except Exception as e:
+                    log.warning(f"Auto-update failed: {e}")
+
+    def _stuck_check_loop(self) -> None:
+        """Check for stuck tasks every 60s."""
+        while self._busy and self._stuck_detector:
+            time.sleep(60)
+            if not self._busy or not self._stuck_detector:
+                break
+            try:
+                diag = self._stuck_detector.check()
+                if diag:
+                    diagnosis = self._get_stuck_diagnosis(diag)
+                    msg = self._stuck_detector.format_stuck_alert(diag, diagnosis)
+                    self._reply(msg)
+                    log.warning(f"Stuck alert #{diag['alert_number']}: {diag.get('child_commands', [])}")
+            except Exception as e:
+                log.warning(f"Stuck check failed: {e}")
+
+    def _get_stuck_diagnosis(self, diag: dict) -> str:
+        """Ask Claude to self-diagnose why it's stuck. Returns diagnosis text."""
+        if not self.active_session_id or self.config.get("cli_tool") != "claude":
+            return ""
+        try:
+            child_cmds = ", ".join(diag.get("child_commands", [])[:2])
+            elapsed_min = int(diag["elapsed"] // 60)
+            from adapters.base import get_login_shell_env
+            env = get_login_shell_env()
+            result = subprocess.run(
+                ["zsh", "-i", "-c",
+                 f'claude -p "You have been running for {elapsed_min} minutes. '
+                 f'Your child process ({child_cmds}) has been unchanged for '
+                 f'{int(diag["stale_minutes"])} minutes. Why are you stuck? '
+                 f'What is blocking? Reply in 2 plain text sentences." '
+                 f'--output-format json --dangerously-skip-permissions --effort low '
+                 f'--resume {self.active_session_id}'],
+                capture_output=True, text=True, timeout=30,
+                cwd=self.active_session_cwd or "/tmp",
+                env=env,
+            )
+            if result.returncode == 0:
+                import json as _json
+                data = _json.loads(result.stdout)
+                return data.get("result", "")[:200]
+        except Exception as e:
+            log.debug(f"Self-diagnosis failed: {e}")
+        return ""
 
     # --- Main Loop ---
 

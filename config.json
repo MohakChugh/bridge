@@ -17,7 +17,7 @@
   "idle_check_interval": 5,
   "max_poll_timeout": 600,
   "echo_window_seconds": 15,
-  "cli_tool": "wasabi",
+  "cli_tool": "claude",
   "adapters": {
     "claude": {
       "effort": "max"

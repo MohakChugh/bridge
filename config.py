@@ -19,6 +19,11 @@ DEFAULT_CONFIG = {
     "idle_check_interval": 5,
     "max_poll_timeout": 600,
     "echo_window_seconds": 15,
+    "eta_auto_interval": 900,
+    "stuck_threshold": 5400,
+    "stuck_alert_interval": 1800,
+    "stuck_max_alerts": 3,
+    "stuck_stale_child_minutes": 10,
     "cli_tool": "claude",
     "adapters": {
         "claude": {"effort": "max"},
