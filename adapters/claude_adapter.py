@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import Optional
 import json
+import os
 import shlex
 import subprocess
 
@@ -42,11 +43,13 @@ class ClaudeAdapter(BaseAdapter):
             adapter_cfg = cfg.get("adapters", {}).get("claude", {})
             effort = adapter_cfg.get("effort", "max")
 
+            mcp_config = os.path.expanduser("~/.claude/.mcp.json")
             cmd = (
                 "claude -p " + shlex.quote(prompt)
                 + " --output-format json --dangerously-skip-permissions"
                 + f" --effort {shlex.quote(effort)}"
                 + " --append-system-prompt " + shlex.quote(BRIEF_INSTRUCTION)
+                + (f" --mcp-config {shlex.quote(mcp_config)}" if os.path.exists(mcp_config) else "")
             )
             if resume_session_id:
                 cmd += " --resume " + shlex.quote(resume_session_id)
