@@ -1,0 +1,108 @@
+"""Claude Code CLI adapter."""
+
+from __future__ import annotations
+from typing import Optional
+import json
+import shlex
+import subprocess
+
+from .base import BaseAdapter
+
+BRIEF_INSTRUCTION = (
+    "You are replying via iMessage text. Respond like a WhatsApp or text message "
+    "— casual, short, plain text. No markdown ever (no backticks, asterisks, hashes, "
+    "bullets, code blocks). Just natural conversational text like you are texting a "
+    "friend who asked for help. If sharing code or commands, just write them inline "
+    "as plain text. Keep it brief but complete."
+)
+
+
+class ClaudeAdapter(BaseAdapter):
+    def name(self) -> str:
+        return "claude"
+
+    def is_available(self) -> bool:
+        try:
+            r = subprocess.run(["zsh", "-l", "-c", "which claude"], capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def spawn(
+        self,
+        prompt: str,
+        cwd: str,
+        timeout: int = 18000,
+        resume_session_id: Optional[str] = None,
+        process_holder: object = None,
+        config: Optional[dict] = None,
+    ) -> dict:
+        try:
+            cfg = config or {}
+            adapter_cfg = cfg.get("adapters", {}).get("claude", {})
+            effort = adapter_cfg.get("effort", "max")
+
+            cmd = (
+                "claude -p " + shlex.quote(prompt)
+                + " --output-format json --dangerously-skip-permissions"
+                + f" --effort {shlex.quote(effort)}"
+                + " --append-system-prompt " + shlex.quote(BRIEF_INSTRUCTION)
+            )
+            if resume_session_id:
+                cmd += " --resume " + shlex.quote(resume_session_id)
+
+            proc = subprocess.Popen(
+                ["zsh", "-l", "-c", cmd],
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if process_holder and hasattr(process_holder, "_active_process"):
+                process_holder._active_process = proc
+
+            stdout, stderr = proc.communicate(timeout=timeout)
+
+            if proc.returncode == 0:
+                summary = self._extract_response(stdout)
+                session_id = self._extract_session_id(stdout)
+                return {"success": True, "output": summary, "error": "", "session_id": session_id}
+            else:
+                return {
+                    "success": False, "output": "",
+                    "error": stderr[:200] or f"exit code {proc.returncode}",
+                    "session_id": None,
+                }
+        except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+            return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
+        except FileNotFoundError:
+            return {"success": False, "output": "", "error": "claude CLI not found", "session_id": None}
+
+    def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
+        # Claude sessions are cleared by removing session_id from state
+        pass
+
+    def _extract_response(self, output: str) -> str:
+        try:
+            data = json.loads(output)
+            if isinstance(data, dict) and "result" in data:
+                text = data["result"]
+            elif isinstance(data, dict) and "content" in data:
+                text = data["content"]
+            else:
+                text = str(data)
+        except (json.JSONDecodeError, TypeError):
+            text = output
+        return self.strip_markdown(text)
+
+    @staticmethod
+    def _extract_session_id(output: str) -> Optional[str]:
+        try:
+            data = json.loads(output)
+            if isinstance(data, dict):
+                return data.get("session_id")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None

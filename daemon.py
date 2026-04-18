@@ -20,7 +20,7 @@ from chatdb import ChatDB
 from config import load_config, save_config, load_state, save_state
 from echo_filter import EchoFilter
 from parser import parse_prefix
-from router import spawn_claude_session
+from adapters import get_adapter, list_adapters
 from sender import send_imessage, OUTBOUND_MARKER
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
@@ -202,6 +202,10 @@ class Daemon:
         if cmd_lower.startswith("/remind "):
             self._cmd_remind(cmd[8:].strip())
             return
+        if cmd_lower.startswith("/tool"):
+            arg = cmd[5:].strip()
+            self._cmd_tool(arg)
+            return
 
         # Regular message — parse prefix
         parsed = parse_prefix(text)
@@ -325,6 +329,25 @@ class Daemon:
         self._task_queue.append(prompt)
         self._reply(f"Queued ({len(self._task_queue)} total).")
 
+    def _cmd_tool(self, arg: str) -> None:
+        """Switch CLI tool or show current."""
+        if not arg:
+            current = self.config.get("cli_tool", "claude")
+            available = list_adapters()
+            self._reply(f"Current: {current}. Available: {', '.join(available)}")
+            return
+        name = arg.lower()
+        try:
+            adapter = get_adapter(name)
+            if not adapter.is_available():
+                self._reply(f"{name} not found in PATH.")
+                return
+            self.config["cli_tool"] = name
+            save_config(CONFIG_PATH, self.config)
+            self._reply(f"Switched to {name}.")
+        except KeyError as e:
+            self._reply(str(e))
+
     def _cmd_remind(self, args: str) -> None:
         parts = args.split(None, 1)
         if len(parts) < 2:
@@ -423,17 +446,21 @@ class Daemon:
         self._track_history("user", prompt)
 
         try:
-            result = spawn_claude_session(
+            adapter = get_adapter(self.config.get("cli_tool", "claude"))
+            result = adapter.spawn(
                 prompt=prompt,
                 cwd=cwd,
-                timeout=self.config.get("claude_p_timeout", 600),
+                timeout=self.config.get("claude_p_timeout", 18000),
                 process_holder=self,
+                config=self.config,
             )
 
             if result["success"]:
                 if result.get("session_id"):
                     self._save_active_session(result["session_id"], cwd)
                     log.info(f"Active session: {result['session_id']}")
+                elif not self.active_session_id:
+                    self._save_active_session("auto", cwd)
                 self._track_history("assistant", result['output'])
                 self._reply(result['output'])
             else:
@@ -460,12 +487,14 @@ class Daemon:
         self._track_history("user", prompt)
 
         try:
-            result = spawn_claude_session(
+            adapter = get_adapter(self.config.get("cli_tool", "claude"))
+            result = adapter.spawn(
                 prompt=prompt,
                 cwd=cwd,
-                timeout=self.config.get("claude_p_timeout", 600),
+                timeout=self.config.get("claude_p_timeout", 18000),
                 resume_session_id=self.active_session_id,
                 process_holder=self,
+                config=self.config,
             )
 
             if result["success"]:

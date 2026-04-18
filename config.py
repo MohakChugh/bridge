@@ -20,6 +20,11 @@ DEFAULT_CONFIG = {
     "idle_check_interval": 5,
     "max_poll_timeout": 600,
     "echo_window_seconds": 15,
+    "cli_tool": "claude",
+    "adapters": {
+        "claude": {"effort": "max"},
+        "wasabi": {"account": "YOUR_ACCT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},
+    },
 }
 
 
