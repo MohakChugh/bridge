@@ -1,5 +1,7 @@
 """Send iMessages via AppleScript."""
 
+from __future__ import annotations
+from typing import Optional
 import subprocess
 
 SEND_SCRIPT = """on run argv
@@ -7,7 +9,7 @@ SEND_SCRIPT = """on run argv
 end run"""
 
 
-def send_imessage(chat_guid: str, text: str) -> str | None:
+def send_imessage(chat_guid: str, text: str) -> Optional[str]:
     """Send text to a chat via osascript. Returns error string or None on success."""
     result = subprocess.run(
         ["osascript", "-", text, chat_guid],

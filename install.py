@@ -64,7 +64,7 @@ def install_plist():
     <string>com.claude.imessage-bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/python3</string>
         <string>{BASE_DIR}/daemon.py</string>
     </array>
     <key>RunAtLoad</key>

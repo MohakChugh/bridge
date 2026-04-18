@@ -1,5 +1,7 @@
 """Read-only interface to ~/Library/Messages/chat.db."""
 
+from __future__ import annotations
+from typing import Optional
 import re
 import sqlite3
 from parser import parse_attributed_body
@@ -24,7 +26,7 @@ class ChatDB:
         self.conn.execute("PRAGMA query_only = ON")
         self.self_addresses = self._detect_self_addresses()
 
-    def _detect_self_addresses(self) -> set[str]:
+    def _detect_self_addresses(self) -> set:
         """Detect the user's own addresses from sent messages."""
         rows = self.conn.execute(
             "SELECT DISTINCT account FROM message "
@@ -43,7 +45,7 @@ class ChatDB:
         row = self.conn.execute("SELECT MAX(ROWID) AS max_id FROM message").fetchone()
         return row["max_id"] or 0
 
-    def find_self_chat_guid(self) -> str | None:
+    def find_self_chat_guid(self) -> Optional[str]:
         """Find the chat GUID for self-chat (DM with yourself).
 
         Checks both self_addresses (from message.account) and handle addresses
@@ -73,7 +75,7 @@ class ChatDB:
                 return row["guid"]
         return None
 
-    def poll(self, watermark: int) -> list[dict]:
+    def poll(self, watermark: int) -> list:
         """Get all messages with ROWID > watermark, ordered ascending."""
         rows = self.conn.execute(
             """
@@ -108,7 +110,7 @@ class ChatDB:
             })
         return result
 
-    def get_history(self, chat_guid: str, limit: int = 50) -> list[dict]:
+    def get_history(self, chat_guid: str, limit: int = 50) -> list:
         """Get recent messages for a chat, returned in chronological order."""
         rows = self.conn.execute(
             """

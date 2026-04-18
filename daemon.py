@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """iMessage Bridge Daemon — polls chat.db, routes to Claude Code sessions."""
 
+from __future__ import annotations
+from typing import Optional
 import logging
 import logging.handlers
 import os
@@ -99,7 +101,7 @@ class Daemon:
         else:
             self.echo_filter.track(guid, text)
 
-    def _is_self_chat(self, handle_id: str | None) -> bool:
+    def _is_self_chat(self, handle_id: Optional[str]) -> bool:
         """Check if the handle belongs to the user (self-chat)."""
         if not handle_id:
             return False

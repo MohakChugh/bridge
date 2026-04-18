@@ -1,9 +1,12 @@
 """Parse iMessage text: prefix routing and attributedBody extraction."""
 
+from __future__ import annotations
+from typing import Optional
+
 KNOWN_ALIASES = {"centralis", "frontend", "nexus", "home", "default"}
 
 
-def parse_prefix(text: str) -> dict | None:
+def parse_prefix(text: str) -> Optional[dict]:
     """Parse message text into routing action.
 
     Returns:
@@ -32,7 +35,7 @@ def parse_prefix(text: str) -> dict | None:
     return {"action": "spawn", "prompt": remainder, "directory_alias": "default"}
 
 
-def parse_attributed_body(blob: bytes | None) -> str | None:
+def parse_attributed_body(blob: Optional[bytes]) -> Optional[str]:
     """Extract plain text from NSAttributedString binary blob.
 
     macOS Ventura+ stores message text in attributedBody when the text column

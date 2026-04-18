@@ -1,5 +1,6 @@
 """Track outbound messages to filter echoes in self-chat."""
 
+from __future__ import annotations
 import re
 import time
 
