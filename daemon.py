@@ -463,6 +463,16 @@ class Daemon:
 
     def _handle_picker_reply(self, reply: str) -> None:
         """Process numbered session pick or 'new' during /switch."""
+        # If user sends a / command, exit picker mode and let it route normally
+        if reply.startswith("/"):
+            self._picker_mode = False
+            self._picker_sessions = []
+            if self._picker_timeout_thread:
+                self._picker_timeout_thread.cancel()
+                self._picker_timeout_thread = None
+            # Re-process as normal message (will hit command routing)
+            return
+
         # Cancel timeout
         if self._picker_timeout_thread:
             self._picker_timeout_thread.cancel()

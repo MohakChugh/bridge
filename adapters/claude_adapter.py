@@ -43,13 +43,11 @@ class ClaudeAdapter(BaseAdapter):
             adapter_cfg = cfg.get("adapters", {}).get("claude", {})
             effort = adapter_cfg.get("effort", "max")
 
-            mcp_config = os.path.expanduser("~/.claude/.mcp.json")
             cmd = (
                 "claude -p " + shlex.quote(prompt)
                 + " --output-format json --dangerously-skip-permissions"
                 + f" --effort {shlex.quote(effort)}"
                 + " --append-system-prompt " + shlex.quote(BRIEF_INSTRUCTION)
-                + (f" --mcp-config {shlex.quote(mcp_config)}" if os.path.exists(mcp_config) else "")
             )
             if resume_session_id:
                 cmd += " --resume " + shlex.quote(resume_session_id)
@@ -86,24 +84,10 @@ class ClaudeAdapter(BaseAdapter):
             return {"success": False, "output": "", "error": "claude CLI not found", "session_id": None}
 
     def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
-        """List Claude Code sessions. Parses `claude --resume list` output."""
-        try:
-            from .base import get_login_shell_env
-            env = get_login_shell_env()
-            result = subprocess.run(
-                ["zsh", "-i", "-c", "claude --resume list 2>&1 | head -15"],
-                cwd=cwd, capture_output=True, text=True, timeout=10, env=env,
-            )
-            sessions = []
-            for line in result.stdout.strip().split("\n"):
-                line = line.strip()
-                if not line or line.startswith("─") or line.startswith("No "):
-                    continue
-                # Parse lines like: "abc-123  2h ago  fix auth handler"
-                sessions.append({"id": line.split()[0] if line.split() else "", "preview": line[:60], "age": "", "messages": 0})
-            return sessions[:10]
-        except Exception:
-            return []
+        """List Claude Code sessions. Returns empty — Claude's --resume list is unreliable in non-interactive mode."""
+        # Claude --resume list requires interactive mode and often errors with
+        # "requires a valid session ID". Return empty to trigger "No sessions" path.
+        return []
 
     def clear_session(self, cwd: str, config: Optional[dict] = None) -> None:
         # Claude sessions are cleared by removing session_id from state
