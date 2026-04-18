@@ -16,9 +16,10 @@ class ProgressTracker:
     """Tracks progress of a running Claude Code session via stream-json events
     and on-disk task files."""
 
-    def __init__(self, session_id: Optional[str] = None):
+    def __init__(self, session_id: Optional[str] = None, pid: Optional[int] = None):
         self.start_time = time.time()
         self.session_id = session_id
+        self._pid = pid
         self.tool_calls: list[dict] = []
         self.current_action: Optional[str] = None
         self.text_chunks: list[str] = []
@@ -56,6 +57,11 @@ class ProgressTracker:
         """Return structured progress data."""
         elapsed = time.time() - self.start_time
         tasks = self._read_task_files()
+
+        # If no session-specific tasks, try scanning ALL recent task dirs
+        if not tasks:
+            tasks = self._scan_recent_tasks()
+
         done = [t for t in tasks if t.get("status") == "completed"]
         pending = [t for t in tasks if t.get("status") == "pending"]
         in_progress = [t for t in tasks if t.get("status") == "in_progress"]
@@ -67,9 +73,14 @@ class ProgressTracker:
             remaining = len(pending) + len(in_progress)
             eta_seconds = remaining / rate if rate > 0 else None
 
+        # Get current action from child processes if not set via events
+        current = self.current_action
+        if not current and self._pid:
+            current = self._get_current_action_from_pid()
+
         return {
             "elapsed": elapsed,
-            "current_action": self.current_action,
+            "current_action": current,
             "tasks_total": len(tasks),
             "tasks_done": len(done),
             "tasks_pending": len(pending),
@@ -122,6 +133,69 @@ class ProgressTracker:
             return f"Completed in {elapsed_min}m {elapsed_sec}s ({p['tool_call_count']} tool calls)."
         else:
             return f"Completed in {elapsed_min}m {elapsed_sec}s."
+
+    def _get_current_action_from_pid(self) -> Optional[str]:
+        """Inspect child processes to determine what's happening right now."""
+        if not self._pid:
+            return None
+        try:
+            result = subprocess.run(
+                ["pgrep", "-P", str(self._pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+            child_pids = [p for p in result.stdout.strip().split("\n") if p.strip()]
+            if not child_pids:
+                return "Processing..."
+            # Get command of deepest child
+            for cpid in reversed(child_pids):
+                r = subprocess.run(
+                    ["ps", "-o", "command=", "-p", cpid],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cmd = r.stdout.strip()
+                if cmd:
+                    # Extract meaningful part
+                    if "brazil-build" in cmd:
+                        return "Running brazil-build"
+                    if "ada credentials" in cmd:
+                        return "Refreshing ADA credentials"
+                    if "cdk deploy" in cmd or "cdk synth" in cmd:
+                        return "CDK deploy"
+                    if "pytest" in cmd or "python" in cmd.lower() and "test" in cmd.lower():
+                        return "Running tests"
+                    if "git" in cmd:
+                        return "Git operation"
+                    if "claude" in cmd:
+                        return "Thinking..."
+                    # Generic: first 40 chars
+                    return cmd[:40]
+            return "Processing..."
+        except Exception:
+            return "Processing..."
+
+    def _scan_recent_tasks(self) -> list:
+        """Scan all task dirs for recently modified tasks (within last 10min)."""
+        tasks_base = os.path.expanduser("~/.claude/tasks")
+        if not os.path.isdir(tasks_base):
+            return []
+        cutoff = time.time() - 600  # Last 10 minutes
+        all_tasks = []
+        try:
+            for session_dir in os.listdir(tasks_base):
+                dir_path = os.path.join(tasks_base, session_dir)
+                if not os.path.isdir(dir_path):
+                    continue
+                # Check if any file modified recently
+                try:
+                    mtime = os.path.getmtime(dir_path)
+                    if mtime < cutoff:
+                        continue
+                except OSError:
+                    continue
+                all_tasks.extend(self._parse_task_dir(dir_path))
+            return all_tasks
+        except OSError:
+            return []
 
     def _read_task_files(self) -> list:
         """Read task progress from ~/.claude/tasks/ matching current session."""

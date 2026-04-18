@@ -589,6 +589,10 @@ class Daemon:
             self._reply("Nothing running.")
             return
 
+        # Lazily set PID for child process inspection
+        if self._active_process and not self._progress_tracker._pid:
+            self._progress_tracker._pid = self._active_process.pid
+
         msg = self._progress_tracker.format_eta_message()
         self._reply(msg)
 
@@ -1080,6 +1084,10 @@ class Daemon:
 
     def _start_auto_updates(self) -> None:
         """Start background threads for auto-progress updates and stuck detection."""
+        # Update tracker PID once process is running
+        if self._progress_tracker and self._active_process:
+            self._progress_tracker._pid = self._active_process.pid
+
         interval = self.config.get("eta_auto_interval", 900)
         if interval > 0:
             threading.Thread(target=self._auto_update_loop, args=(interval,), daemon=True).start()
@@ -1095,6 +1103,9 @@ class Daemon:
     def _auto_update_loop(self, interval: float) -> None:
         """Send periodic progress updates via iMessage."""
         while self._busy and self._progress_tracker:
+            # Lazily update PID once process starts
+            if self._progress_tracker and self._active_process and not self._progress_tracker._pid:
+                self._progress_tracker._pid = self._active_process.pid
             time.sleep(interval)
             if self._busy and self._progress_tracker:
                 try:
