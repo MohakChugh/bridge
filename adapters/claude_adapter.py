@@ -6,7 +6,7 @@ import json
 import shlex
 import subprocess
 
-from .base import BaseAdapter
+from .base import BaseAdapter, get_login_shell_env
 
 BRIEF_INSTRUCTION = (
     "You are replying via iMessage text. Respond like a WhatsApp or text message "
@@ -51,12 +51,14 @@ class ClaudeAdapter(BaseAdapter):
             if resume_session_id:
                 cmd += " --resume " + shlex.quote(resume_session_id)
 
+            env = get_login_shell_env()
             proc = subprocess.Popen(
-                ["zsh", "-l", "-c", cmd],
+                ["zsh", "-c", cmd],
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
             if process_holder and hasattr(process_holder, "_active_process"):
                 process_holder._active_process = proc

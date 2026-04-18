@@ -6,7 +6,7 @@ import json
 import shlex
 import subprocess
 
-from .base import BaseAdapter
+from .base import BaseAdapter, get_login_shell_env
 
 # Noise patterns in wasabi JSON log output to skip
 SKIP_PATTERNS = [
@@ -81,12 +81,14 @@ class WasabiAdapter(BaseAdapter):
             # (json mode in wasabi is just as noisy)
             wasabi_cmd = " ".join(parts)
 
+            env = get_login_shell_env()
             proc = subprocess.Popen(
-                ["zsh", "-l", "-c", wasabi_cmd],
+                ["zsh", "-c", wasabi_cmd],
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
             if process_holder and hasattr(process_holder, "_active_process"):
                 process_holder._active_process = proc
@@ -119,13 +121,14 @@ class WasabiAdapter(BaseAdapter):
         account = adapter_cfg.get("account", "YOUR_ACCT_ID")
         model = adapter_cfg.get("model", "global.anthropic.claude-opus-4-6-v1:1m")
         try:
+            env = get_login_shell_env()
             subprocess.run(
-                ["zsh", "-l", "-c",
+                ["zsh", "-c",
                  f"wasabi --disable-initial-workspace-summary --auto-accept-edits "
                  f"--dangerously-accept-all-prompts --model-arn={shlex.quote(model)} "
                  f"--skip-git-safety-check --account {shlex.quote(account)} "
                  f"--non-interactive --disable-continue --prompt '/clear'"],
-                cwd=cwd, capture_output=True, text=True, timeout=30,
+                cwd=cwd, capture_output=True, text=True, timeout=30, env=env,
             )
         except Exception:
             pass

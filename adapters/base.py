@@ -3,7 +3,42 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
+import os
 import re
+import subprocess
+
+_LOGIN_ENV_CACHE = None
+
+
+def get_login_shell_env() -> dict:
+    """Capture full zsh login shell environment once, cache it.
+
+    This gives child processes the same PATH and env vars as an
+    interactive terminal — including toolbox, cargo, homebrew, etc.
+    Without this, launchd daemons get a stripped environment.
+    """
+    global _LOGIN_ENV_CACHE
+    if _LOGIN_ENV_CACHE is not None:
+        return _LOGIN_ENV_CACHE
+
+    try:
+        result = subprocess.run(
+            ["zsh", "-l", "-c", "env"],
+            capture_output=True, text=True, timeout=10,
+            env={"HOME": os.path.expanduser("~"), "PATH": "/usr/bin:/bin"},
+        )
+        env = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, _, val = line.partition("=")
+                env[key] = val
+        # Ensure HOME is set
+        env.setdefault("HOME", os.path.expanduser("~"))
+        _LOGIN_ENV_CACHE = env
+    except Exception:
+        _LOGIN_ENV_CACHE = os.environ.copy()
+
+    return _LOGIN_ENV_CACHE
 
 
 class BaseAdapter(ABC):
