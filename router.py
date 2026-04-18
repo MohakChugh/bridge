@@ -61,7 +61,7 @@ def poll_until_idle(
     return prev_snapshot
 
 
-def _extract_summary(output: str, max_chars: int = 0) -> str:
+def _extract_summary(output: str, max_chars: int = 2000) -> str:
     """Extract a readable summary from claude -p JSON output."""
     try:
         data = json.loads(output)

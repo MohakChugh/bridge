@@ -20,6 +20,12 @@ DEFAULT_CONFIG = {
     "idle_check_interval": 5,
     "max_poll_timeout": 600,
     "echo_window_seconds": 15,
+    "status_mode": "silent",
+    "response_prefix": "\u25b8 ",
+    "max_response_chars": 2000,
+    "chat_mode": "self_chat",
+    "user_address": "",
+    "bot_address": "",
 }
 
 

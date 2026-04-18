@@ -115,6 +115,7 @@ class Daemon:
         self._active_process = None  # For /cancel
         self._task_queue: list[str] = []  # For /queue
         self._reminders: list[dict] = []  # For /remind
+        self._queue_prefix = ""  # Prepended to next response when processing queue
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
@@ -132,20 +133,29 @@ class Daemon:
         except Exception:
             pass
 
-    def _reply(self, text: str) -> None:
+    def _reply(self, text: str, is_response: bool = False) -> None:
+        """Send iMessage reply. is_response=True adds the configured prefix."""
         guid = self.config.get("reply_chat_guid")
         if not guid:
             log.warning(f"No reply_chat_guid — cannot send: {text}")
             return
-        err = send_imessage(guid, text)
+        prefix = self.config.get("response_prefix", "") if is_response else ""
+        queue_prefix = self._queue_prefix
+        self._queue_prefix = ""
+        full_text = f"{prefix}{queue_prefix}{text}"
+        err = send_imessage(guid, full_text)
         if err:
             log.error(f"Failed to send iMessage: {err}")
         else:
-            self.echo_filter.track(guid, text)
+            self.echo_filter.track(guid, full_text)
 
     def _is_self_chat(self, handle_id: Optional[str]) -> bool:
         if not handle_id:
             return False
+        if self.config.get("chat_mode") == "bot_account":
+            # In bot_account mode, accept messages from the user's real address
+            user_addr = self.config.get("user_address", "")
+            return handle_id.lower() == user_addr.lower()
         return handle_id.lower() in {a.lower() for a in self.config.get("self_addresses", [])}
 
     # --- Message Routing ---
@@ -394,8 +404,9 @@ class Daemon:
         if not self._task_queue:
             return
         prompt = self._task_queue.pop(0)
+        remaining = len(self._task_queue)
         log.info(f"Processing queued task: {prompt[:60]}")
-        self._reply(f"Next queued: {prompt[:50]}")
+        self._queue_prefix = f"[Queue: {remaining} left] " if remaining > 0 else "[Queued] "
         parsed = parse_prefix(prompt)
         if parsed and parsed["action"] == "spawn":
             self._handle_spawn(parsed)
@@ -418,7 +429,8 @@ class Daemon:
         short = prompt[:60] + ("..." if len(prompt) > 60 else "")
         self._busy = True
         self._current_task = short
-        self._reply("On it.")
+        if self.config.get("status_mode") == "ack":
+            self._reply("On it.")
         log.info(f"Spawning claude -p in {cwd}: {short}")
         self._track_history("user", prompt)
 
@@ -426,7 +438,7 @@ class Daemon:
             result = spawn_claude_session(
                 prompt=prompt,
                 cwd=cwd,
-                timeout=self.config.get("claude_p_timeout", 600),
+                timeout=self.config.get("claude_p_timeout", 18000),
                 process_holder=self,
             )
 
@@ -435,7 +447,7 @@ class Daemon:
                     self._save_active_session(result["session_id"], cwd)
                     log.info(f"Active session: {result['session_id']}")
                 self._track_history("assistant", result['output'])
-                self._reply(result['output'])
+                self._reply(result['output'], is_response=True)
             else:
                 self._reply(f"Failed: {result['error'][:80]}")
         finally:
@@ -455,7 +467,8 @@ class Daemon:
         short = prompt[:60] + ("..." if len(prompt) > 60 else "")
         self._busy = True
         self._current_task = short
-        self._reply("On it.")
+        if self.config.get("status_mode") == "ack":
+            self._reply("On it.")
         log.info(f"Continuing session {self.active_session_id}: {short}")
         self._track_history("user", prompt)
 
@@ -463,7 +476,7 @@ class Daemon:
             result = spawn_claude_session(
                 prompt=prompt,
                 cwd=cwd,
-                timeout=self.config.get("claude_p_timeout", 600),
+                timeout=self.config.get("claude_p_timeout", 18000),
                 resume_session_id=self.active_session_id,
                 process_holder=self,
             )
@@ -472,7 +485,7 @@ class Daemon:
                 if result.get("session_id"):
                     self._save_active_session(result["session_id"], cwd)
                 self._track_history("assistant", result['output'])
-                self._reply(result['output'])
+                self._reply(result['output'], is_response=True)
             else:
                 self._reply(f"Failed: {result['error'][:80]}")
         finally:
