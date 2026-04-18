@@ -28,7 +28,7 @@ def get_login_shell_env() -> dict:
         result = subprocess.run(
             ["zsh", "-i", "-c", "env"],
             capture_output=True, text=True, timeout=10,
-            env={"HOME": os.path.expanduser("~"), "PATH": "/usr/bin:/bin"},
+            env={"HOME": os.path.expanduser("~"), "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
         )
         env = {}
         for line in result.stdout.splitlines():
