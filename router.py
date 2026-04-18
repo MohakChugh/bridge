@@ -95,7 +95,7 @@ def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600) -> dict:
     """Spawn a new claude -p session and capture output."""
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json"],
+            ["claude", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
             cwd=cwd,
             capture_output=True,
             text=True,
