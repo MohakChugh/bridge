@@ -22,6 +22,8 @@ from echo_filter import EchoFilter
 from parser import parse_prefix
 from adapters import get_adapter, list_adapters
 from progress_tracker import ProgressTracker, StuckDetector
+from scheduler import cron_matches, next_cron_fire, parse_schedule_via_llm, format_schedule_list
+from transcriber import is_audio_attachment, transcribe
 from sender import send_imessage, OUTBOUND_MARKER
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
@@ -60,6 +62,14 @@ HELP_TEXT = (
     "/eta interval 5m - auto-update every 5 min (default 15m)\n"
     "/eta stuck 2h - stuck alert threshold (default 90m)\n"
     "/eta stuck off - disable stuck alerts\n"
+    "\n"
+    "Schedule:\n"
+    "/schedule <natural language> - recurring task (LLM parses)\n"
+    "/schedule list - show active schedules\n"
+    "/schedule cancel/pause/resume <N> - manage schedules\n"
+    "\n"
+    "Voice:\n"
+    "Send voice memo - auto-transcribes, confirm before executing\n"
     "\n"
     "Productivity:\n"
     "/queue <prompt> - run after current task\n"
@@ -139,11 +149,18 @@ class Daemon:
         self._pending_switch_cwd: Optional[str] = None
         self._pending_switch_alias: Optional[str] = None
         self._picker_timeout_thread: Optional[threading.Timer] = None
+        # Voice memo confirm flow
+        self._awaiting_voice_confirm = False
+        self._pending_voice_text: Optional[str] = None
+        # Schedule confirm flow
+        self._awaiting_schedule_confirm = False
+        self._pending_schedule: Optional[dict] = None
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
-        # Start reminder checker thread
+        # Start background threads
         threading.Thread(target=self._reminder_loop, daemon=True).start()
+        threading.Thread(target=self._schedule_loop, daemon=True).start()
 
         log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
 
@@ -181,6 +198,21 @@ class Daemon:
             return
 
         text = msg["text"]
+
+        # Check for voice memo attachment (even if text is empty)
+        if msg.get("has_attachments"):
+            try:
+                attachments = self.chatdb.get_attachments(msg["rowid"])
+                for att in attachments:
+                    if is_audio_attachment(att.get("mime_type"), att.get("uti")):
+                        filepath = att.get("filename", "")
+                        if filepath:
+                            filepath = os.path.expanduser(filepath)
+                            self._handle_voice_attachment(filepath)
+                            return
+            except Exception as e:
+                log.warning(f"Attachment check failed: {e}")
+
         if not text or not text.strip():
             return
         if OUTBOUND_MARKER in text:
@@ -192,7 +224,13 @@ class Daemon:
 
         log.info(f"New message: {text[:80]}...")
 
-        # Intercept picker/keep-end flows before normal routing
+        # Intercept confirm flows before normal routing
+        if self._awaiting_voice_confirm:
+            self._handle_voice_confirm(text.strip().lower())
+            return
+        if self._awaiting_schedule_confirm:
+            self._handle_schedule_confirm(text.strip().lower())
+            return
         if self._awaiting_keep_end:
             self._handle_keep_end_reply(text.strip().lower())
             return
@@ -241,6 +279,10 @@ class Daemon:
         if cmd_lower.startswith("/eta"):
             arg = cmd[4:].strip()
             self._cmd_eta(arg)
+            return
+        if cmd_lower.startswith("/schedule"):
+            arg = cmd[9:].strip()
+            self._cmd_schedule(arg)
             return
 
         # Regular message — parse prefix
@@ -595,6 +637,203 @@ class Daemon:
             elif unit == "s":
                 total += val
         return total if total > 0 else None
+
+    # --- /schedule ---
+
+    def _cmd_schedule(self, args: str) -> None:
+        """Manage scheduled tasks."""
+        if not args or args == "help":
+            self._reply(
+                "/schedule <natural language> - create recurring task\n"
+                "/schedule list - show active schedules\n"
+                "/schedule cancel <N> - cancel by number\n"
+                "/schedule cancel all - cancel all\n"
+                "/schedule pause <N> - pause schedule\n"
+                "/schedule resume <N> - resume paused schedule"
+            )
+            return
+
+        if args == "list":
+            tasks = self.state.get("scheduled_tasks", [])
+            self._reply(format_schedule_list(tasks))
+            return
+
+        if args.startswith("cancel "):
+            val = args[7:].strip()
+            tasks = self.state.get("scheduled_tasks", [])
+            if val == "all":
+                count = len(tasks)
+                self.state["scheduled_tasks"] = []
+                save_state(STATE_PATH, self.state)
+                self._reply(f"All {count} schedule(s) cancelled.")
+                return
+            try:
+                idx = int(val) - 1
+                if 0 <= idx < len(tasks):
+                    removed = tasks.pop(idx)
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Schedule #{idx+1} cancelled: {removed.get('human', '?')}")
+                else:
+                    self._reply(f"Invalid number. Use /schedule list to see IDs.")
+            except ValueError:
+                self._reply("Use: /schedule cancel <N> or /schedule cancel all")
+            return
+
+        if args.startswith("pause "):
+            try:
+                idx = int(args[6:].strip()) - 1
+                tasks = self.state.get("scheduled_tasks", [])
+                if 0 <= idx < len(tasks):
+                    tasks[idx]["status"] = "paused"
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Schedule #{idx+1} paused.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /schedule pause <N>")
+            return
+
+        if args.startswith("resume "):
+            try:
+                idx = int(args[7:].strip()) - 1
+                tasks = self.state.get("scheduled_tasks", [])
+                if 0 <= idx < len(tasks):
+                    tasks[idx]["status"] = "active"
+                    tasks[idx]["next_fire"] = next_cron_fire(tasks[idx].get("cron", ""))
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Schedule #{idx+1} resumed.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /schedule resume <N>")
+            return
+
+        # Natural language → LLM parse → confirm
+        self._reply("Parsing schedule...")
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+
+        def _parse():
+            parsed = parse_schedule_via_llm(args, env)
+            if parsed:
+                self._pending_schedule = {
+                    "cron": parsed["cron"],
+                    "human": parsed["human"],
+                    "prompt": args.split(parsed["human"].split()[-1] if parsed["human"] else "", 1)[-1].strip() or args,
+                }
+                # Better: extract prompt as everything after the schedule description
+                # For now, use the full natural text as prompt
+                self._pending_schedule["prompt"] = args
+                self._awaiting_schedule_confirm = True
+                self._reply(f'Parsed: {parsed["human"]} — "{args}". Confirm? (y/n)')
+            else:
+                self._reply("Could not parse schedule. Try: /schedule every 2h check pipeline")
+
+        threading.Thread(target=_parse, daemon=True).start()
+
+    def _handle_schedule_confirm(self, reply: str) -> None:
+        self._awaiting_schedule_confirm = False
+        if reply in ("y", "yes"):
+            sched = self._pending_schedule
+            if not sched:
+                return
+            tasks = self.state.setdefault("scheduled_tasks", [])
+            task_id = len(tasks) + 1
+            task = {
+                "id": task_id,
+                "cron": sched["cron"],
+                "human": sched["human"],
+                "prompt": sched["prompt"],
+                "tool": self.config.get("cli_tool", "claude"),
+                "cwd": self.active_session_cwd or self.config["directories"]["default"],
+                "next_fire": next_cron_fire(sched["cron"]),
+                "status": "active",
+                "created_at": time.time(),
+                "last_ran": None,
+                "last_result": None,
+            }
+            tasks.append(task)
+            save_state(STATE_PATH, self.state)
+            from datetime import datetime
+            next_dt = datetime.fromtimestamp(task["next_fire"])
+            self._reply(f'Schedule #{task_id} created. Next run: {next_dt.strftime("%b %d %I:%M %p")}.')
+        else:
+            self._reply("Schedule cancelled.")
+        self._pending_schedule = None
+
+    def _schedule_loop(self) -> None:
+        """Background thread that fires scheduled tasks."""
+        while self.running:
+            now = time.time()
+            tasks = self.state.get("scheduled_tasks", [])
+            for task in tasks:
+                if task.get("status") != "active":
+                    continue
+                if task.get("next_fire", 0) > 0 and now >= task["next_fire"]:
+                    log.info(f"Firing scheduled task: {task.get('human', '?')}")
+                    self._execute_scheduled_task(task)
+                    # Update next_fire
+                    task["next_fire"] = next_cron_fire(task.get("cron", ""))
+                    save_state(STATE_PATH, self.state)
+            time.sleep(60)
+
+    def _execute_scheduled_task(self, task: dict) -> None:
+        """Run scheduled task in separate thread (doesn't block main flow)."""
+        def _run():
+            tool = task.get("tool", self.config.get("cli_tool", "claude"))
+            try:
+                adapter = get_adapter(tool)
+            except KeyError:
+                adapter = get_adapter("claude")
+            cwd = task.get("cwd", self.config["directories"]["default"])
+            result = adapter.spawn(
+                prompt=task["prompt"],
+                cwd=cwd,
+                timeout=self.config.get("claude_p_timeout", 18000),
+                config=self.config,
+            )
+            if result["success"]:
+                summary = f'Scheduled [{task.get("human", "?")}]: {result["output"][:200]}'
+            else:
+                summary = f'Scheduled [{task.get("human", "?")}] FAILED: {result["error"][:100]}'
+            self._reply(summary)
+            task["last_ran"] = time.time()
+            task["last_result"] = "success" if result["success"] else "failed"
+            save_state(STATE_PATH, self.state)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # --- /voice (auto-detect) ---
+
+    def _handle_voice_attachment(self, audio_path: str) -> None:
+        """Transcribe voice memo and enter confirm flow."""
+        self._reply("Transcribing...")
+
+        def _transcribe():
+            text = transcribe(audio_path)
+            if text:
+                self._pending_voice_text = text
+                self._awaiting_voice_confirm = True
+                self._reply(f'Heard: "{text}". Send? (y/n)')
+            else:
+                self._reply("Could not transcribe voice memo.")
+
+        threading.Thread(target=_transcribe, daemon=True).start()
+
+    def _handle_voice_confirm(self, reply: str) -> None:
+        self._awaiting_voice_confirm = False
+        text = self._pending_voice_text
+        self._pending_voice_text = None
+        if reply in ("y", "yes") and text:
+            # Route transcribed text as normal prompt
+            from parser import parse_prefix
+            parsed = parse_prefix(text)
+            if parsed and parsed["action"] == "spawn":
+                threading.Thread(target=self._handle_spawn, args=(parsed,), daemon=True).start()
+            elif parsed:
+                threading.Thread(target=self._handle_continue, args=(parsed,), daemon=True).start()
+        else:
+            self._reply("Voice prompt cancelled.")
 
     def _reminder_loop(self) -> None:
         """Background thread that fires reminders."""

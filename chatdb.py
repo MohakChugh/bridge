@@ -139,5 +139,19 @@ class ChatDB:
             })
         return result
 
+    def get_attachments(self, message_rowid: int) -> list:
+        """Get attachments for a message."""
+        rows = self.conn.execute(
+            """
+            SELECT a.filename, a.mime_type, a.uti, a.total_bytes
+            FROM attachment a
+            JOIN message_attachment_join maj ON maj.attachment_id = a.ROWID
+            WHERE maj.message_id = ?
+            """,
+            (message_rowid,),
+        ).fetchall()
+        return [{"filename": r["filename"], "mime_type": r["mime_type"],
+                 "uti": r["uti"], "bytes": r["total_bytes"]} for r in rows]
+
     def close(self):
         self.conn.close()
