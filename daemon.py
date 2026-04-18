@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""iMessage Bridge Daemon — polls chat.db, routes to Claude Code sessions."""
+
+import logging
+import logging.handlers
+import os
+import signal
+import sys
+import time
+
+# Add project directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from chatdb import ChatDB
+from config import load_config, save_config, load_state, save_state
+from echo_filter import EchoFilter
+from parser import parse_prefix
+from router import inject_into_session, spawn_claude_session
+from sender import send_imessage
+
+BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+STATE_PATH = os.path.join(BASE_DIR, "state.json")
+LOG_PATH = os.path.join(BASE_DIR, "logs", "daemon.log")
+CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
+
+# Logging with rotation (5MB max, keep 3 backups)
+os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=3),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+log = logging.getLogger("imessage-bridge")
+
+
+class Daemon:
+    def __init__(self):
+        self.running = True
+        self.config = load_config(CONFIG_PATH)
+        self.state = load_state(STATE_PATH)
+        self.echo_filter = EchoFilter(window_seconds=self.config.get("echo_window_seconds", 15))
+
+        # Open chat.db
+        try:
+            self.chatdb = ChatDB(CHAT_DB_PATH)
+        except Exception as e:
+            log.error(f"Cannot open chat.db: {e}")
+            log.error("Grant Full Disk Access to your terminal in System Settings.")
+            self._try_notify_fda_error()
+            sys.exit(1)
+
+        # Detect self addresses
+        if not self.config.get("self_addresses"):
+            self.config["self_addresses"] = list(self.chatdb.self_addresses)
+            log.info(f"Detected self addresses: {self.config['self_addresses']}")
+            save_config(CONFIG_PATH, self.config)
+
+        # Detect self-chat GUID
+        if not self.config.get("reply_chat_guid"):
+            guid = self.chatdb.find_self_chat_guid()
+            if guid:
+                self.config["reply_chat_guid"] = guid
+                log.info(f"Detected self-chat GUID: {guid}")
+                save_config(CONFIG_PATH, self.config)
+            else:
+                log.warning("Could not detect self-chat GUID. Send yourself an iMessage first.")
+
+        # Initialize watermark
+        if self.state["watermark"] == 0:
+            self.state["watermark"] = self.chatdb.get_max_rowid()
+            save_state(STATE_PATH, self.state)
+            log.info(f"Initialized watermark to {self.state['watermark']}")
+
+        log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
+
+    def _try_notify_fda_error(self):
+        """Try to send an iMessage about FDA error. May also fail."""
+        try:
+            cfg = load_config(CONFIG_PATH)
+            guid = cfg.get("reply_chat_guid")
+            if guid:
+                send_imessage(guid, "iMessage Bridge: Cannot read chat.db. Grant Full Disk Access.")
+        except Exception:
+            pass
+
+    def _reply(self, text: str) -> None:
+        """Send an iMessage reply to self-chat."""
+        guid = self.config.get("reply_chat_guid")
+        if not guid:
+            log.warning(f"No reply_chat_guid — cannot send: {text}")
+            return
+        err = send_imessage(guid, text)
+        if err:
+            log.error(f"Failed to send iMessage: {err}")
+        else:
+            self.echo_filter.track(guid, text)
+
+    def _is_self_chat(self, handle_id: str | None) -> bool:
+        """Check if the handle belongs to the user (self-chat)."""
+        if not handle_id:
+            return False
+        return handle_id.lower() in {a.lower() for a in self.config.get("self_addresses", [])}
+
+    def _handle_message(self, msg: dict) -> None:
+        """Process a single new message."""
+        if msg["is_from_me"]:
+            return
+
+        if not self._is_self_chat(msg["handle_id"]):
+            return
+
+        text = msg["text"]
+        if not text or not text.strip():
+            return
+
+        chat_guid = msg["chat_guid"]
+        if self.echo_filter.is_echo(chat_guid, text):
+            return
+
+        log.info(f"New message: {text[:80]}...")
+
+        parsed = parse_prefix(text)
+        if parsed is None:
+            return
+
+        if parsed["action"] == "spawn":
+            self._handle_spawn(parsed)
+        elif parsed["action"] == "inject":
+            self._handle_inject(parsed)
+
+    def _handle_spawn(self, parsed: dict) -> None:
+        """Spawn a new claude -p session."""
+        alias = parsed["directory_alias"]
+        prompt = parsed["prompt"]
+        cwd = self.config["directories"].get(alias, self.config["directories"]["default"])
+
+        if not os.path.isdir(cwd):
+            self._reply(f"Directory not found: {cwd}")
+            return
+
+        self._reply(f"Starting new session in {alias}...")
+        log.info(f"Spawning claude -p in {cwd}: {prompt[:60]}")
+
+        result = spawn_claude_session(
+            prompt=prompt,
+            cwd=cwd,
+            timeout=self.config.get("claude_p_timeout", 600),
+        )
+
+        if result["success"]:
+            self._reply(f"Done: {result['output']}")
+        else:
+            self._reply(f"Error: {result['error']}")
+
+    def _handle_inject(self, parsed: dict) -> None:
+        """Inject into running tmux Claude session."""
+        prompt = parsed["prompt"]
+        session = self.config.get("tmux_session", "claude-session")
+
+        self._reply("Injecting into active session...")
+        log.info(f"Injecting into {session}: {prompt[:60]}")
+
+        result = inject_into_session(
+            session_name=session,
+            prompt=prompt,
+            check_interval=self.config.get("idle_check_interval", 5),
+            stabilization_checks=self.config.get("idle_stabilization_checks", 2),
+            max_timeout=self.config.get("max_poll_timeout", 600),
+        )
+
+        if result["success"]:
+            self._reply(result["output"])
+        else:
+            self._reply(result["error"])
+
+    def poll(self) -> None:
+        """Single poll cycle — check for new messages."""
+        try:
+            rows = self.chatdb.poll(self.state["watermark"])
+        except Exception as e:
+            log.warning(f"Poll query failed: {e}")
+            return
+
+        for msg in rows:
+            self.state["watermark"] = msg["rowid"]
+            save_state(STATE_PATH, self.state)
+            self._handle_message(msg)
+
+    def run(self) -> None:
+        """Main loop."""
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        signal.signal(signal.SIGINT, lambda *_: self.stop())
+
+        interval = self.config.get("poll_interval", 1.0)
+        while self.running:
+            self.poll()
+            time.sleep(interval)
+
+        self.chatdb.close()
+        log.info("Daemon stopped.")
+
+    def stop(self) -> None:
+        self.running = False
+
+
+if __name__ == "__main__":
+    daemon = Daemon()
+    daemon.run()
