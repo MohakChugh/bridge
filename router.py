@@ -94,12 +94,16 @@ def _extract_pane_summary(pane_output: str, max_chars: int = 500) -> str:
 def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600) -> dict:
     """Spawn a new claude -p session and capture output."""
     try:
+        # Inherit full environment so Bedrock/AWS auth works
+        import os
+        env = os.environ.copy()
         result = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
         if result.returncode == 0:
             summary = _extract_summary(result.stdout)

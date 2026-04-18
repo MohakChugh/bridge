@@ -81,6 +81,14 @@ def install_plist():
         <string>{HOME}</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>CLAUDE_CODE_USE_BEDROCK</key>
+        <string>1</string>
+        <key>AWS_REGION</key>
+        <string>us-east-1</string>
+        <key>AWS_PROFILE</key>
+        <string>BedrockProfile</string>
+        <key>ANTHROPIC_MODEL</key>
+        <string>us.anthropic.claude-opus-4-6-v1[1m]</string>
     </dict>
 </dict>
 </plist>"""
