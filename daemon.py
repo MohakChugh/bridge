@@ -698,8 +698,8 @@ class Daemon:
         from datetime import datetime
         now = datetime.now()
         prompt = (
-            f"Parse this reminder into a specific date and time. "
-            f"Current time: {now.strftime('%Y-%m-%d %H:%M %A')}. "
+            f"Parse this reminder into a specific date and time in LOCAL time. "
+            f"Current local time: {now.strftime('%Y-%m-%d %H:%M %A')} {time.tzname[0]}. "
             f"Input: {natural_text}. "
             f"Reply ONLY with valid JSON: "
             f'{{\"iso\": \"YYYY-MM-DDTHH:MM:SS\", \"human\": \"readable description\", \"message\": \"the reminder message\"}}. '
