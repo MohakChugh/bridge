@@ -61,7 +61,7 @@ def poll_until_idle(
     return prev_snapshot
 
 
-def _extract_summary(output: str, max_chars: int = 500) -> str:
+def _extract_summary(output: str, max_chars: int = 100) -> str:
     """Extract a readable summary from claude -p JSON output."""
     try:
         data = json.loads(output)
@@ -114,7 +114,8 @@ def spawn_claude_session(prompt: str, cwd: str, timeout: int = 600, resume_sessi
     """Spawn a new claude -p session (or resume existing) and capture output."""
     try:
         # Build the claude command
-        claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions"
+        brief_instruction = "Reply in 15 words max. No markdown, no formatting, no bullet points, no code blocks. Plain text only. Be extremely brief."
+        claude_cmd = "claude -p " + _shell_quote(prompt) + " --output-format json --dangerously-skip-permissions --append-system-prompt " + _shell_quote(brief_instruction)
         if resume_session_id:
             claude_cmd += " --resume " + _shell_quote(resume_session_id)
         # Wrap in zsh login shell so it inherits full PATH, aliases,

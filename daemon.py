@@ -197,7 +197,7 @@ class Daemon:
         if self.active_session_id:
             log.info(f"Ending previous session {self.active_session_id} for new session")
 
-        self._reply(f"Starting new session in {alias}...")
+        self._reply(f"On it.")
         log.info(f"Spawning claude -p in {cwd}: {prompt[:60]}")
 
         result = spawn_claude_session(
@@ -210,21 +210,21 @@ class Daemon:
             if result.get("session_id"):
                 self._save_active_session(result["session_id"], cwd)
                 log.info(f"Active session: {result['session_id']}")
-            self._reply(f"Done: {result['output']}")
+            self._reply(result['output'])
         else:
-            self._reply(f"Error: {result['error']}")
+            self._reply(f"Failed: {result['error'][:80]}")
 
     def _handle_continue(self, parsed: dict) -> None:
         """Continue the active persistent session, or report no session."""
         prompt = parsed["prompt"]
 
         if not self.active_session_id:
-            self._reply("No active session. Use 'new:' prefix to start one, or /end to stop.")
+            self._reply("No session. Send new:<dir>: <prompt> to start.")
             return
 
         cwd = self.active_session_cwd or self.config["directories"]["default"]
         log.info(f"Continuing session {self.active_session_id}: {prompt[:60]}")
-        self._reply("Processing...")
+        self._reply("On it.")
 
         result = spawn_claude_session(
             prompt=prompt,
@@ -237,9 +237,9 @@ class Daemon:
             # Update session_id in case it changed
             if result.get("session_id"):
                 self._save_active_session(result["session_id"], cwd)
-            self._reply(f"{result['output']}")
+            self._reply(result['output'])
         else:
-            self._reply(f"Error: {result['error']}")
+            self._reply(f"Failed: {result['error'][:80]}")
 
     def poll(self) -> None:
         """Single poll cycle — check for new messages."""
