@@ -442,7 +442,8 @@ class Daemon:
         self._busy = True
         self._current_task = short
         self._reply("On it.")
-        log.info(f"Spawning claude -p in {cwd}: {short}")
+        tool = self.config.get("cli_tool", "claude")
+        log.info(f"Spawning {tool} in {cwd}: {short}")
         self._track_history("user", prompt)
 
         try:
