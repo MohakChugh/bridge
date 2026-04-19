@@ -24,6 +24,10 @@ from parser import parse_prefix
 from adapters import get_adapter, list_adapters
 from progress_tracker import ProgressTracker, StuckDetector
 from scheduler import cron_matches, next_cron_fire, parse_schedule_via_llm, format_schedule_list
+from watcher import (
+    get_checker, classify_watch, format_alert, format_dashboard, format_watch_list,
+    MAX_WATCHES, DEFAULT_COOLDOWN,
+)
 # Voice transcription removed — high memory, low value
 from sender import send_imessage, OUTBOUND_MARKER
 
@@ -63,6 +67,14 @@ HELP_TEXT = (
     "/eta interval 5m - auto-update every 5 min (default 15m)\n"
     "/eta stuck 2h - stuck alert threshold (default 90m)\n"
     "/eta stuck off - disable stuck alerts\n"
+    "\n"
+    "Watch:\n"
+    "/watch <natural language> - monitor for changes\n"
+    "/watch list - show active watches\n"
+    "/watch stop/pause/resume <N> - manage watches\n"
+    "/watch mute <time> - silence all watches\n"
+    "/watch snooze <N> - snooze watch 30min\n"
+    "/watch - dashboard\n"
     "\n"
     "Schedule:\n"
     "/schedule <natural language> - recurring task (LLM parses)\n"
@@ -155,12 +167,19 @@ class Daemon:
         # Remind confirm flow
         self._awaiting_remind_confirm = False
         self._pending_remind: Optional[dict] = None
+        # Watch confirm flows
+        self._awaiting_watch_confirm = False
+        self._pending_watch: Optional[dict] = None
+        self._awaiting_watch_fix = False
+        self._pending_watch_fix: Optional[str] = None
+        self._watch_loop_running = False
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
         # Start background threads
         threading.Thread(target=self._reminder_loop, daemon=True).start()
         threading.Thread(target=self._schedule_loop, daemon=True).start()
+        threading.Thread(target=self._watch_loop, daemon=True).start()
 
         log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
 
@@ -212,6 +231,12 @@ class Daemon:
         log.info(f"New message: {text[:80]}...")
 
         # Intercept confirm flows before normal routing
+        if self._awaiting_watch_fix:
+            self._handle_watch_fix_confirm(text.strip().lower())
+            return
+        if self._awaiting_watch_confirm:
+            self._handle_watch_confirm(text.strip().lower())
+            return
         if self._awaiting_remind_confirm:
             self._handle_remind_confirm(text.strip().lower())
             return
@@ -266,6 +291,10 @@ class Daemon:
         if cmd_lower.startswith("/eta"):
             arg = cmd[4:].strip()
             self._cmd_eta(arg)
+            return
+        if cmd_lower.startswith("/watch"):
+            arg = cmd[6:].strip()
+            self._cmd_watch(arg)
             return
         if cmd_lower.startswith("/schedule"):
             arg = cmd[9:].strip()
@@ -754,6 +783,324 @@ class Daemon:
             elif unit == "s":
                 total += val
         return total if total > 0 else None
+
+    # --- /watch ---
+
+    def _cmd_watch(self, args: str) -> None:
+        """Manage watches — create, list, stop, pause, resume, mute, snooze."""
+        if not args:
+            # Dashboard
+            watches = self.state.get("watches", [])
+            recent = self.state.get("watch_recent_alerts", [])
+            mute = self.state.get("watch_mute_until", 0)
+            self._reply(format_dashboard(watches, recent, mute))
+            return
+
+        if args == "help":
+            self._reply(
+                "/watch <natural language> - create watch\n"
+                "/watch list - show all watches\n"
+                "/watch stop <N> - stop by number\n"
+                "/watch stop all - stop all\n"
+                "/watch pause <N> - pause\n"
+                "/watch resume <N> - resume\n"
+                "/watch mute <time> - silence all\n"
+                "/watch snooze <N> - snooze 30min\n"
+                "/watch - dashboard"
+            )
+            return
+
+        if args == "list":
+            self._reply(format_watch_list(self.state.get("watches", [])))
+            return
+
+        if args.startswith("stop "):
+            val = args[5:].strip()
+            watches = self.state.get("watches", [])
+            if val == "all":
+                count = len(watches)
+                self.state["watches"] = []
+                save_state(STATE_PATH, self.state)
+                self._reply(f"All {count} watch(es) stopped.")
+                return
+            try:
+                idx = int(val) - 1
+                if 0 <= idx < len(watches):
+                    removed = watches.pop(idx)
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Watch #{idx+1} stopped: {removed.get('human', '?')}")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /watch stop <N> or /watch stop all")
+            return
+
+        if args.startswith("pause "):
+            try:
+                idx = int(args[6:].strip()) - 1
+                watches = self.state.get("watches", [])
+                if 0 <= idx < len(watches):
+                    watches[idx]["status"] = "paused"
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Watch #{idx+1} paused.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /watch pause <N>")
+            return
+
+        if args.startswith("resume "):
+            try:
+                idx = int(args[7:].strip()) - 1
+                watches = self.state.get("watches", [])
+                if 0 <= idx < len(watches):
+                    watches[idx]["status"] = "active"
+                    watches[idx]["snooze_until"] = 0
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Watch #{idx+1} resumed.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /watch resume <N>")
+            return
+
+        if args.startswith("mute "):
+            seconds = self._parse_time(args[5:].strip())
+            if seconds:
+                self.state["watch_mute_until"] = time.time() + seconds
+                save_state(STATE_PATH, self.state)
+                self._reply(f"All watches muted for {args[5:].strip()}.")
+            else:
+                self._reply("Bad format. Use: /watch mute 2h")
+            return
+
+        if args.startswith("snooze "):
+            try:
+                idx = int(args[7:].strip()) - 1
+                watches = self.state.get("watches", [])
+                if 0 <= idx < len(watches):
+                    watches[idx]["snooze_until"] = time.time() + 1800  # 30min
+                    save_state(STATE_PATH, self.state)
+                    self._reply(f"Watch #{idx+1} snoozed for 30min.")
+                else:
+                    self._reply("Invalid number.")
+            except ValueError:
+                self._reply("Use: /watch snooze <N>")
+            return
+
+        # Check watch limit
+        if len(self.state.get("watches", [])) >= MAX_WATCHES:
+            self._reply(f"Max {MAX_WATCHES} watches reached. /watch stop one first.")
+            return
+
+        # Natural language → LLM classification → confirm
+        self._reply("Parsing watch...")
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+
+        def _parse():
+            parsed = classify_watch(args, self.config, env)
+            if parsed:
+                self._pending_watch = parsed
+                self._awaiting_watch_confirm = True
+                human = parsed.get("human", args)
+                interval_m = parsed.get("interval", 300) // 60
+                self._reply(
+                    f'I\'ll watch: {human}\n'
+                    f'Check every: {interval_m}min\n'
+                    f'Confirm? (y/n)\n'
+                    f'Wrong? Reply with what you meant.'
+                )
+            else:
+                self._reply("Could not parse. Try: /watch all my pipelines")
+
+        threading.Thread(target=_parse, daemon=True).start()
+
+    def _handle_watch_confirm(self, reply: str) -> None:
+        self._awaiting_watch_confirm = False
+        if reply in ("y", "yes"):
+            watch = self._pending_watch
+            if not watch:
+                return
+            watches = self.state.setdefault("watches", [])
+            watch_entry = {
+                "id": len(watches) + 1,
+                "type": watch.get("type", "generic"),
+                "target": watch.get("target", ""),
+                "filters": watch.get("filters", {}),
+                "interval": watch.get("interval", 300),
+                "cooldown": DEFAULT_COOLDOWN,
+                "human": watch.get("human", ""),
+                "auto_diagnose": True,
+                "status": "active",
+                "last_state": {},
+                "last_alert_time": 0,
+                "last_check_time": 0,
+                "snooze_until": 0,
+                "created_at": time.time(),
+                "alert_count": 0,
+            }
+            watches.append(watch_entry)
+            save_state(STATE_PATH, self.state)
+
+            # Capture baseline
+            self._reply("Watch created. Capturing baseline...")
+            try:
+                checker = get_checker(watch_entry["type"])
+                baseline = checker.check(watch_entry["target"], watch_entry["filters"], self.config)
+                watch_entry["last_state"] = self._serialize_state(baseline)
+                watch_entry["last_check_time"] = time.time()
+                save_state(STATE_PATH, self.state)
+                self._reply(f"Watch #{watch_entry['id']} active. Baseline captured.")
+            except Exception as e:
+                self._reply(f"Watch created but baseline failed: {str(e)[:60]}")
+        elif reply in ("n", "no"):
+            self._reply("Watch cancelled.")
+        else:
+            self._reply(f"Didn't understand. Say y or n.\nWrong interpretation? Tell me what you meant.")
+            self._awaiting_watch_confirm = True
+            return
+        self._pending_watch = None
+
+    def _handle_watch_fix_confirm(self, reply: str) -> None:
+        self._awaiting_watch_fix = False
+        if reply in ("y", "yes") and self._pending_watch_fix:
+            self._reply("Executing fix...")
+            fix_cmd = self._pending_watch_fix
+            self._pending_watch_fix = None
+            tool = self.config.get("cli_tool", "claude")
+            try:
+                adapter = get_adapter(tool)
+                result = adapter.spawn(
+                    prompt=fix_cmd,
+                    cwd=self.active_session_cwd or self.config["directories"]["default"],
+                    timeout=120,
+                    config=self.config,
+                )
+                if result["success"]:
+                    self._reply(f"Fix executed: {result['output'][:100]}")
+                else:
+                    self._reply(f"Fix failed: {result['error'][:80]}")
+            except Exception as e:
+                self._reply(f"Fix error: {str(e)[:60]}")
+        else:
+            self._reply("Fix skipped.")
+            self._pending_watch_fix = None
+
+    @staticmethod
+    def _serialize_state(state: dict) -> dict:
+        """Make state JSON-serializable (convert sets to lists)."""
+        result = {}
+        for k, v in state.items():
+            if isinstance(v, set):
+                result[k] = list(v)
+            elif isinstance(v, dict):
+                result[k] = Daemon._serialize_state(v)
+            else:
+                result[k] = v
+        return result
+
+    def _watch_loop(self) -> None:
+        """Background thread that checks all watches for state changes."""
+        self._watch_loop_running = True
+        while self.running:
+            try:
+                # Check mute
+                if self.state.get("watch_mute_until", 0) > time.time():
+                    time.sleep(30)
+                    continue
+
+                watches = self.state.get("watches", [])
+                for watch in watches:
+                    if watch.get("status") != "active":
+                        continue
+                    if watch.get("snooze_until", 0) > time.time():
+                        continue
+                    if time.time() - watch.get("last_check_time", 0) < watch.get("interval", 300):
+                        continue
+
+                    # Time to check
+                    try:
+                        checker = get_checker(watch["type"])
+                        new_state = checker.check(watch["target"], watch.get("filters", {}), self.config)
+                        old_state = watch.get("last_state", {})
+                        # Deserialize old_state lists back to sets for comparison
+                        if "ticket_ids" in old_state and isinstance(old_state["ticket_ids"], list):
+                            old_state["ticket_ids"] = set(old_state["ticket_ids"])
+                        if "ticket_ids" in new_state and isinstance(new_state["ticket_ids"], list):
+                            new_state["ticket_ids"] = set(new_state["ticket_ids"])
+
+                        change = checker.detect_change(old_state, new_state)
+                        watch["last_state"] = self._serialize_state(new_state)
+                        watch["last_check_time"] = time.time()
+
+                        if change and (time.time() - watch.get("last_alert_time", 0)) > watch.get("cooldown", DEFAULT_COOLDOWN):
+                            # ALERT
+                            watch["last_alert_time"] = time.time()
+                            watch["alert_count"] = watch.get("alert_count", 0) + 1
+
+                            # Auto-diagnose in background
+                            if watch.get("auto_diagnose"):
+                                threading.Thread(
+                                    target=self._watch_diagnose_and_alert,
+                                    args=(watch, change),
+                                    daemon=True,
+                                ).start()
+                            else:
+                                alert_msg = format_alert(change, watch)
+                                self._reply(alert_msg)
+
+                            # Record alert
+                            recent = self.state.setdefault("watch_recent_alerts", [])
+                            recent.append({"ts": time.time(), "summary": change[:60], "watch_id": watch.get("id")})
+                            if len(recent) > 50:
+                                self.state["watch_recent_alerts"] = recent[-50:]
+
+                        save_state(STATE_PATH, self.state)
+                    except Exception as e:
+                        log.warning(f"Watch check failed for {watch.get('human', '?')}: {e}")
+
+            except Exception as e:
+                log.warning(f"Watch loop error: {e}")
+
+            time.sleep(30)
+
+        self._watch_loop_running = False
+
+    def _watch_diagnose_and_alert(self, watch: dict, change: str) -> None:
+        """Run diagnosis in background, then send alert with diagnosis."""
+        diagnosis = ""
+        fix = ""
+        try:
+            tool = self.config.get("cli_tool", "claude")
+            adapter = get_adapter(tool)
+            prompt = (
+                f"Diagnose this issue: {change}. "
+                f"Context: watching {watch.get('human', '?')}. "
+                f"Check logs, recent deploys, correlate signals. "
+                f"Reply in 2-3 sentences plain text. "
+                f"Then suggest a fix command if applicable."
+            )
+            result = adapter.spawn(
+                prompt=prompt,
+                cwd=self.active_session_cwd or self.config["directories"]["default"],
+                timeout=60,
+                config=self.config,
+            )
+            if result["success"]:
+                diagnosis = result["output"][:200]
+                # Extract fix if mentioned
+                if "fix:" in diagnosis.lower() or "run:" in diagnosis.lower():
+                    fix = diagnosis.split("fix:")[-1].strip() if "fix:" in diagnosis.lower() else ""
+        except Exception as e:
+            log.warning(f"Watch diagnosis failed: {e}")
+
+        alert_msg = format_alert(change, watch, diagnosis=diagnosis, fix=fix)
+        self._reply(alert_msg)
+
+        if fix:
+            self._pending_watch_fix = fix
+            self._awaiting_watch_fix = True
 
     # --- /schedule ---
 

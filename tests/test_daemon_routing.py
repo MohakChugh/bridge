@@ -44,6 +44,11 @@ def make_daemon():
     d._pending_schedule = None
     d._awaiting_remind_confirm = False
     d._pending_remind = None
+    d._awaiting_watch_confirm = False
+    d._pending_watch = None
+    d._awaiting_watch_fix = False
+    d._pending_watch_fix = None
+    d._watch_loop_running = False
     d.chatdb = MagicMock()
     d.echo_filter = EchoFilter()
     d.running = True
