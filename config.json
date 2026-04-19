@@ -22,7 +22,7 @@
   "stuck_alert_interval": 1800,
   "stuck_max_alerts": 3,
   "stuck_stale_child_minutes": 10,
-  "cli_tool": "claude",
+  "cli_tool": "kiro",
   "adapters": {
     "claude": {
       "effort": "max"

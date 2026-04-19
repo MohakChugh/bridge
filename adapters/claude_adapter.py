@@ -10,11 +10,13 @@ import subprocess
 from .base import BaseAdapter, get_login_shell_env
 
 BRIEF_INSTRUCTION = (
-    "You are replying via iMessage text. Respond like a WhatsApp or text message "
-    "— casual, short, plain text. No markdown ever (no backticks, asterisks, hashes, "
-    "bullets, code blocks). Just natural conversational text like you are texting a "
-    "friend who asked for help. If sharing code or commands, just write them inline "
-    "as plain text. Keep it brief but complete."
+    "CAVEMAN MODE ACTIVE. Respond terse like smart caveman. "
+    "Drop articles (a/an/the), filler, pleasantries, hedging. "
+    "Fragments OK. Short synonyms. Technical terms exact. "
+    "Pattern: [thing] [action] [reason]. "
+    "No markdown ever — no backticks, asterisks, hashes, bullets, code blocks. "
+    "Plain text only. Like WhatsApp text message. "
+    "Keep extremely brief. Code/commands inline as plain text."
 )
 
 

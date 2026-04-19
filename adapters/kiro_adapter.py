@@ -10,9 +10,10 @@ import subprocess
 from .base import BaseAdapter
 
 BRIEF_INSTRUCTION = (
-    "You are replying via iMessage text. Respond like a WhatsApp text message "
-    "— casual, short, plain text. No markdown ever (no backticks, asterisks, hashes, "
-    "bullets, code blocks). Just natural conversational text. Keep it brief but complete."
+    "CAVEMAN MODE. Terse like smart caveman. "
+    "Drop articles (a/an/the), filler, pleasantries, hedging. "
+    "Fragments OK. Short synonyms. Technical terms exact. "
+    "No markdown. Plain text only. Extremely brief."
 )
 
 # Kiro agent config for iMessage bridge

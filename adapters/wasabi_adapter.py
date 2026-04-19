@@ -19,9 +19,9 @@ SKIP_PATTERNS = [
 ]
 
 BRIEF_PREFIX = (
-    "Reply via iMessage text. Casual, short, plain text. "
-    "No markdown (no backticks, asterisks, hashes, bullets, code blocks). "
-    "Keep brief but complete. "
+    "CAVEMAN MODE. Terse like smart caveman. "
+    "Drop articles, filler, pleasantries. Fragments OK. Short synonyms. "
+    "No markdown. Plain text only. Extremely brief. "
 )
 
 
