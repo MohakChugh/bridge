@@ -174,28 +174,41 @@ class ProgressTracker:
             return "Processing..."
 
     def _scan_recent_tasks(self) -> list:
-        """Scan all task dirs for recently modified tasks (within last 10min)."""
+        """Scan all task dirs for the most recently active tasks.
+
+        Claude -p sessions create tasks under their own session ID,
+        which differs from the print-mode session ID we store. So we
+        scan ALL task dirs and pick the one with most recent activity.
+        """
         tasks_base = os.path.expanduser("~/.claude/tasks")
         if not os.path.isdir(tasks_base):
             return []
-        cutoff = time.time() - 600  # Last 10 minutes
-        all_tasks = []
+
+        # Find the most recently modified task dir
+        best_dir = None
+        best_mtime = 0
         try:
             for session_dir in os.listdir(tasks_base):
                 dir_path = os.path.join(tasks_base, session_dir)
                 if not os.path.isdir(dir_path):
                     continue
-                # Check if any file modified recently
                 try:
-                    mtime = os.path.getmtime(dir_path)
-                    if mtime < cutoff:
-                        continue
+                    # Check mtime of files inside the dir (not just dir itself)
+                    for fname in os.listdir(dir_path):
+                        fpath = os.path.join(dir_path, fname)
+                        mtime = os.path.getmtime(fpath)
+                        if mtime > best_mtime:
+                            best_mtime = mtime
+                            best_dir = dir_path
                 except OSError:
                     continue
-                all_tasks.extend(self._parse_task_dir(dir_path))
-            return all_tasks
         except OSError:
             return []
+
+        # Only use if modified since this tracker started (task is from current run)
+        if best_dir and best_mtime >= self.start_time:
+            return self._parse_task_dir(best_dir)
+        return []
 
     def _read_task_files(self) -> list:
         """Read task progress from ~/.claude/tasks/ matching current session."""
