@@ -1032,6 +1032,7 @@ class Daemon:
             self._current_task = None
             self._active_process = None
             self._progress_tracker = None
+            self._auto_update_running = False
             if self._stuck_detector:
                 self._stuck_detector.reset()
             self._stuck_detector = None
@@ -1085,6 +1086,7 @@ class Daemon:
             self._current_task = None
             self._active_process = None
             self._progress_tracker = None
+            self._auto_update_running = False
             if self._stuck_detector:
                 self._stuck_detector.reset()
             self._stuck_detector = None
@@ -1093,14 +1095,17 @@ class Daemon:
     # --- Auto-Updates & Stuck Detection ---
 
     def _start_auto_updates(self) -> None:
-        """Start background threads for auto-progress updates and stuck detection."""
-        # Update tracker PID once process is running
-        if self._progress_tracker and self._active_process:
-            self._progress_tracker._pid = self._active_process.pid
+        """Start background threads for auto-progress updates and stuck detection.
+        Only starts if not already running — prevents duplicate threads."""
+        # Don't start duplicate threads
+        if hasattr(self, '_auto_update_running') and self._auto_update_running:
+            return
+
+        self._auto_update_running = True
 
         interval = self.config.get("eta_auto_interval", 900)
         if interval > 0:
-            threading.Thread(target=self._auto_update_loop, args=(interval,), daemon=True).start()
+            threading.Thread(target=self._auto_update_loop, daemon=True).start()
 
         threshold = self.config.get("stuck_threshold", 5400)
         if threshold > 0 and self._active_process:
@@ -1110,12 +1115,15 @@ class Daemon:
             )
             threading.Thread(target=self._stuck_check_loop, daemon=True).start()
 
-    def _auto_update_loop(self, interval: float) -> None:
-        """Send periodic progress updates via iMessage."""
+    def _auto_update_loop(self) -> None:
+        """Send periodic progress updates via iMessage.
+        Reads interval from config each loop so /eta interval changes take effect."""
         while self._busy and self._progress_tracker:
             # Lazily update PID once process starts
             if self._progress_tracker and self._active_process and not self._progress_tracker._pid:
                 self._progress_tracker._pid = self._active_process.pid
+            # Read interval from config each time (not captured arg)
+            interval = self.config.get("eta_auto_interval", 900)
             time.sleep(interval)
             if self._busy and self._progress_tracker:
                 try:
