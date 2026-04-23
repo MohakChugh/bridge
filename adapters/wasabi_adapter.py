@@ -75,8 +75,10 @@ class WasabiAdapter(BaseAdapter):
                 "--skip-git-safety-check",
                 f"--account {shlex.quote(account)}",
                 "--non-interactive",
-                f"--prompt {shlex.quote(full_prompt)}",
             ]
+            if not resume_session_id or resume_session_id == "none":
+                parts.append("--disable-continue")
+            parts.append(f"--prompt {shlex.quote(full_prompt)}")
             # Use text mode with no-color for cleanest output
             # (json mode in wasabi is just as noisy)
             wasabi_cmd = " ".join(parts)

@@ -39,6 +39,8 @@ def make_daemon():
     d._queue_prefix = ""
     d.echo_filter = EchoFilter()
     d.running = True
+    d._slack_channel = None
+    d._reply_via_slack = None
 
     replies = []
     d._reply = lambda text, **kw: replies.append(text)

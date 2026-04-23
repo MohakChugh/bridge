@@ -24,6 +24,9 @@ def make_daemon():
     d.state = {"watermark": 0}
     d.echo_filter = EchoFilter()
     d._queue_prefix = ""
+    d._slack_channel = None
+    d._reply_via_slack = None
+    d._imessage_enabled = True
     return d
 
 

@@ -52,6 +52,8 @@ def make_daemon():
     d.chatdb = MagicMock()
     d.echo_filter = EchoFilter()
     d.running = True
+    d._slack_channel = None
+    d._reply_via_slack = None
     d._reply = MagicMock()
     return d
 

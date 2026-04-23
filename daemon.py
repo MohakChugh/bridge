@@ -142,48 +142,59 @@ class Daemon:
         self.state = load_state(STATE_PATH)
         self.echo_filter = EchoFilter(window_seconds=self.config.get("echo_window_seconds", 15))
 
-        # Open chat.db
-        try:
-            self.chatdb = ChatDB(CHAT_DB_PATH)
-        except Exception as e:
-            log.error(f"Cannot open chat.db: {e}")
-            log.error("Grant Full Disk Access to your terminal in System Settings.")
-            self._try_notify_fda_error()
-            sys.exit(1)
+        # Open chat.db (macOS only — skip on Linux for Slack-only mode)
+        self.chatdb = None
+        self._imessage_enabled = False
+        if sys.platform == "darwin":
+            try:
+                self.chatdb = ChatDB(CHAT_DB_PATH)
+                self._imessage_enabled = True
+            except Exception as e:
+                slack_cfg = self.config.get("slack", {})
+                if slack_cfg.get("enabled"):
+                    log.warning(f"Cannot open chat.db ({e}) — running Slack-only mode")
+                else:
+                    log.error(f"Cannot open chat.db: {e}")
+                    log.error("Grant Full Disk Access to your terminal in System Settings.")
+                    self._try_notify_fda_error()
+                    sys.exit(1)
+        else:
+            log.info("Non-macOS platform detected — running Slack-only mode (no iMessage)")
 
-        # Detect self addresses
-        if not self.config.get("self_addresses") or len(self.config["self_addresses"]) <= 1:
-            addrs = set(self.chatdb.self_addresses)
-            guid = self.config.get("reply_chat_guid") or self.chatdb.find_self_chat_guid()
-            if guid:
-                handles = self.chatdb.conn.execute(
-                    "SELECT DISTINCT h.id FROM handle h "
-                    "JOIN chat_handle_join chj ON chj.handle_id = h.ROWID "
-                    "JOIN chat c ON c.ROWID = chj.chat_id "
-                    "WHERE c.guid = ?", (guid,)
-                ).fetchall()
-                for h in handles:
-                    if h["id"]:
-                        addrs.add(h["id"].lower())
-            self.config["self_addresses"] = list(addrs)
-            log.info(f"Detected self addresses: {self.config['self_addresses']}")
-            save_config(CONFIG_PATH, self.config)
-
-        # Detect self-chat GUID
-        if not self.config.get("reply_chat_guid"):
-            guid = self.chatdb.find_self_chat_guid()
-            if guid:
-                self.config["reply_chat_guid"] = guid
-                log.info(f"Detected self-chat GUID: {guid}")
+        if self._imessage_enabled and self.chatdb:
+            # Detect self addresses
+            if not self.config.get("self_addresses") or len(self.config["self_addresses"]) <= 1:
+                addrs = set(self.chatdb.self_addresses)
+                guid = self.config.get("reply_chat_guid") or self.chatdb.find_self_chat_guid()
+                if guid:
+                    handles = self.chatdb.conn.execute(
+                        "SELECT DISTINCT h.id FROM handle h "
+                        "JOIN chat_handle_join chj ON chj.handle_id = h.ROWID "
+                        "JOIN chat c ON c.ROWID = chj.chat_id "
+                        "WHERE c.guid = ?", (guid,)
+                    ).fetchall()
+                    for h in handles:
+                        if h["id"]:
+                            addrs.add(h["id"].lower())
+                self.config["self_addresses"] = list(addrs)
+                log.info(f"Detected self addresses: {self.config['self_addresses']}")
                 save_config(CONFIG_PATH, self.config)
-            else:
-                log.warning("Could not detect self-chat GUID. Send yourself an iMessage first.")
 
-        # Initialize watermark
-        if self.state["watermark"] == 0:
-            self.state["watermark"] = self.chatdb.get_max_rowid()
-            save_state(STATE_PATH, self.state)
-            log.info(f"Initialized watermark to {self.state['watermark']}")
+            # Detect self-chat GUID
+            if not self.config.get("reply_chat_guid"):
+                guid = self.chatdb.find_self_chat_guid()
+                if guid:
+                    self.config["reply_chat_guid"] = guid
+                    log.info(f"Detected self-chat GUID: {guid}")
+                    save_config(CONFIG_PATH, self.config)
+                else:
+                    log.warning("Could not detect self-chat GUID. Send yourself an iMessage first.")
+
+            # Initialize watermark
+            if self.state["watermark"] == 0:
+                self.state["watermark"] = self.chatdb.get_max_rowid()
+                save_state(STATE_PATH, self.state)
+                log.info(f"Initialized watermark to {self.state['watermark']}")
 
         # Active session tracking
         self.active_session_id = self.state.get("active_session_id")
@@ -191,6 +202,8 @@ class Daemon:
         self._busy = False
         self._current_task = None
         self._active_process = None  # For /cancel
+        self._slack_channel = None
+        self._reply_via_slack: Optional[dict] = None
         self._task_queue: list[str] = []  # For /queue
         self._reminders: list[dict] = []  # For /remind
         self._progress_tracker: Optional[ProgressTracker] = None
@@ -217,6 +230,22 @@ class Daemon:
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
 
+        # Slack channel (optional)
+        slack_cfg = self.config.get("slack", {})
+        if slack_cfg.get("enabled") and slack_cfg.get("bot_token") and slack_cfg.get("app_token"):
+            try:
+                from slack_channel import SlackChannel
+                self._slack_channel = SlackChannel(
+                    bot_token=slack_cfg["bot_token"],
+                    app_token=slack_cfg["app_token"],
+                    allowed_users=slack_cfg.get("allowed_users", []),
+                    message_callback=self._handle_slack_message,
+                )
+                threading.Thread(target=self._slack_channel.start, daemon=True).start()
+                log.info("Slack channel started")
+            except Exception as e:
+                log.error(f"Failed to start Slack channel: {e}")
+
         # Start background threads
         threading.Thread(target=self._reminder_loop, daemon=True).start()
         threading.Thread(target=self._schedule_loop, daemon=True).start()
@@ -234,6 +263,12 @@ class Daemon:
             pass
 
     def _reply(self, text: str) -> None:
+        if self._reply_via_slack and self._slack_channel:
+            self._slack_channel.send(text, self._reply_via_slack)
+            return
+        if not self._imessage_enabled:
+            log.warning(f"No reply channel available: {text[:80]}")
+            return
         guid = self.config.get("reply_chat_guid")
         if not guid:
             log.warning(f"No reply_chat_guid — cannot send: {text}")
@@ -361,10 +396,18 @@ class Daemon:
     def _cmd_end(self) -> None:
         if self.active_session_id:
             log.info(f"Ending session: {self.active_session_id}")
+            tool = self.config.get("cli_tool", "claude")
+            adapter = get_adapter(tool)
+            if self.active_session_cwd:
+                try:
+                    adapter.clear_session(self.active_session_cwd, config=self.config)
+                except Exception as e:
+                    log.warning(f"Failed to clear {tool} session: {e}")
             self.active_session_id = None
             self.active_session_cwd = None
             self.state["active_session_id"] = None
             self.state["active_session_cwd"] = None
+            self.state["message_history"] = []
             save_state(STATE_PATH, self.state)
             self._reply("Session ended.")
         else:
@@ -1396,6 +1439,7 @@ class Daemon:
                 prompt=prompt,
                 cwd=cwd,
                 timeout=self.config.get("claude_p_timeout", 18000),
+                resume_session_id=None,
                 process_holder=self,
                 config=self.config,
             )
@@ -1568,6 +1612,8 @@ class Daemon:
     # --- Main Loop ---
 
     def poll(self) -> None:
+        if not self._imessage_enabled or not self.chatdb:
+            return
         try:
             rows = self.chatdb.poll(self.state["watermark"])
         except Exception as e:
@@ -1579,6 +1625,113 @@ class Daemon:
             save_state(STATE_PATH, self.state)
             self._handle_message(msg)
 
+    def _handle_slack_message(self, text: str, channel: "SlackChannel", ctx: dict) -> None:
+        """Route Slack message through same command parser as iMessage."""
+        self._reply_via_slack = ctx
+        channel.react("zap", ctx)
+        try:
+            # Build a fake msg dict that _handle_message-like routing expects
+            # Reuse same routing logic but skip iMessage-specific checks
+            text = text.strip()
+            if not text:
+                return
+
+            log.info(f"Slack message: {text[:80]}")
+
+            # Intercept confirm flows
+            if self._awaiting_watch_fix:
+                self._handle_watch_fix_confirm(text.lower())
+                return
+            if self._awaiting_watch_confirm:
+                self._handle_watch_confirm(text.lower())
+                return
+            if self._awaiting_remind_confirm:
+                self._handle_remind_confirm(text.lower())
+                return
+            if self._awaiting_schedule_confirm:
+                self._handle_schedule_confirm(text.lower())
+                return
+            if self._awaiting_keep_end:
+                self._handle_keep_end_reply(text.lower())
+                return
+            if self._picker_mode:
+                self._handle_picker_reply(text)
+                return
+
+            cmd_lower = text.lower()
+            if cmd_lower == "/end":
+                self._cmd_end()
+                return
+            if cmd_lower == "/status":
+                self._cmd_status()
+                return
+            if cmd_lower == "/cancel":
+                self._cmd_cancel()
+                return
+            if cmd_lower == "/help":
+                self._cmd_help()
+                return
+            if cmd_lower == "/history":
+                self._cmd_history()
+                return
+            if cmd_lower == "/sessions":
+                self._cmd_sessions()
+                return
+            if cmd_lower == "/dirs":
+                self._cmd_dirs()
+                return
+            if cmd_lower.startswith("/switch "):
+                self._cmd_switch(text[8:].strip())
+                return
+            if cmd_lower.startswith("/queue "):
+                self._cmd_queue(text[7:].strip())
+                return
+            if cmd_lower.startswith("/remind "):
+                self._cmd_remind(text[8:].strip())
+                return
+            if cmd_lower.startswith("/tool"):
+                self._cmd_tool(text[5:].strip())
+                return
+            if cmd_lower.startswith("/eta"):
+                self._cmd_eta(text[4:].strip())
+                return
+            if cmd_lower.startswith("/watch"):
+                self._cmd_watch(text[6:].strip())
+                return
+            if cmd_lower.startswith("/schedule"):
+                self._cmd_schedule(text[9:].strip())
+                return
+
+            parsed = parse_prefix(text)
+            if parsed is None:
+                self._reply_via_slack = None
+                return
+
+            if self._busy:
+                self._reply("Busy. Send /status or /queue <task>.")
+                self._reply_via_slack = None
+                return
+
+            self._reply_via_slack = None  # Clear before threading — threads set their own
+            if parsed["action"] in ("spawn", "continue", "inject"):
+                slack_ctx = dict(ctx)
+                action = parsed["action"]
+                def _run_with_slack(a=action, p=parsed, sc=slack_ctx):
+                    self._reply_via_slack = sc
+                    try:
+                        if a == "spawn":
+                            self._handle_spawn(p)
+                        else:
+                            self._handle_continue(p)
+                    finally:
+                        self._reply_via_slack = None
+                threading.Thread(target=_run_with_slack, daemon=True).start()
+
+        except Exception as e:
+            log.error(f"Slack handler error: {e}")
+            self._reply(f"Error: {str(e)[:100]}")
+            self._reply_via_slack = None
+
     def run(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.stop())
         signal.signal(signal.SIGINT, lambda *_: self.stop())
@@ -1588,11 +1741,17 @@ class Daemon:
             self.poll()
             time.sleep(interval)
 
-        self.chatdb.close()
+        if self.chatdb:
+            self.chatdb.close()
         log.info("Daemon stopped.")
 
     def stop(self) -> None:
         self.running = False
+        if self._slack_channel:
+            try:
+                self._slack_channel.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

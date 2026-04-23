@@ -1,0 +1,31 @@
+{
+  "poll_interval": 1.0,
+  "directories": {
+    "default": "/path/to/workspace",
+    "home": "/Users/yourusername/"
+  },
+  "self_addresses": [],
+  "reply_chat_guid": null,
+  "claude_p_timeout": 18000,
+  "idle_stabilization_checks": 2,
+  "idle_check_interval": 5,
+  "max_poll_timeout": 600,
+  "echo_window_seconds": 15,
+  "eta_auto_interval": 1800,
+  "stuck_threshold": 5400,
+  "stuck_alert_interval": 1800,
+  "stuck_max_alerts": 3,
+  "stuck_stale_child_minutes": 10,
+  "slack": {
+    "enabled": false,
+    "bot_token": "xoxb-YOUR-BOT-TOKEN",
+    "app_token": "xapp-YOUR-APP-TOKEN",
+    "allowed_users": []
+  },
+  "cli_tool": "claude",
+  "adapters": {
+    "claude": { "effort": "max" },
+    "wasabi": { "account": "YOUR_ACCOUNT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m" },
+    "kiro": { "model": "claude-opus-4.7" }
+  }
+}
