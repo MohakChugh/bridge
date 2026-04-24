@@ -44,12 +44,33 @@ class ReminderBody(BaseModel):
     text: str
 
 
+class ReminderDirectBody(BaseModel):
+    message: str
+    fire_at_epoch: float  # unix epoch seconds
+    human: Optional[str] = None
+
+
 class ScheduleBody(BaseModel):
     text: str
+    tool: Optional[str] = None
+    cwd: Optional[str] = None
+
+
+class ScheduleDirectBody(BaseModel):
+    cron: str
+    human: str
+    prompt: str
+    tool: Optional[str] = None
+    cwd: Optional[str] = None
 
 
 class WatchBody(BaseModel):
     text: str
+
+
+class ParseBody(BaseModel):
+    text: str
+    kind: str  # "remind" | "schedule" | "watch"
 
 
 def create_app(session_manager, daemon_ref) -> FastAPI:
@@ -132,19 +153,191 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"deleted": True}
 
-    # ---- Reminders / Schedules / Watches (read-only for now, via daemon state) ----
+    # ---- Reminders ----
 
     @app.get("/api/reminders")
     def list_reminders():
-        return {"reminders": daemon_ref.state.get("reminders", [])}
+        reminders = daemon_ref.state.get("reminders", [])
+        for i, r in enumerate(reminders):
+            r["id"] = i  # stable index-based id
+        return {"reminders": reminders}
+
+    @app.post("/api/reminders/parse")
+    def parse_reminder(body: ReminderBody):
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+        parsed = daemon_ref._parse_remind_via_llm(body.text, env)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Could not parse reminder")
+        return parsed
+
+    @app.post("/api/reminders")
+    def create_reminder(body: ReminderDirectBody):
+        import time as t
+        reminder = {
+            "fire_at": body.fire_at_epoch,
+            "message": body.message,
+            "human": body.human or "",
+        }
+        daemon_ref._reminders.append(reminder)
+        daemon_ref.state.setdefault("reminders", []).append(reminder)
+        from config import save_state
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("reminder.created", reminder)
+        return reminder
+
+    @app.delete("/api/reminders/{idx}")
+    def delete_reminder(idx: int):
+        reminders = daemon_ref.state.get("reminders", [])
+        if idx < 0 or idx >= len(reminders):
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        removed = reminders.pop(idx)
+        daemon_ref._reminders = [r for r in daemon_ref._reminders if r.get("message") != removed.get("message")]
+        from config import save_state
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("reminder.deleted", {"id": idx})
+        return {"deleted": True}
+
+    # ---- Schedules ----
 
     @app.get("/api/schedules")
     def list_schedules():
         return {"schedules": daemon_ref.state.get("scheduled_tasks", [])}
 
+    @app.post("/api/schedules/parse")
+    def parse_schedule(body: ScheduleBody):
+        from scheduler import parse_schedule_via_llm
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+        parsed = parse_schedule_via_llm(body.text, env)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Could not parse schedule")
+        return parsed
+
+    @app.post("/api/schedules")
+    def create_schedule(body: ScheduleDirectBody):
+        import time as t
+        from scheduler import next_cron_fire
+        from config import save_state
+        tasks = daemon_ref.state.setdefault("scheduled_tasks", [])
+        task_id = max([task.get("id", 0) for task in tasks], default=0) + 1
+        task = {
+            "id": task_id,
+            "cron": body.cron,
+            "human": body.human,
+            "prompt": body.prompt,
+            "tool": body.tool or daemon_ref.config.get("cli_tool", "claude"),
+            "cwd": body.cwd or daemon_ref.config["directories"].get("default", "/tmp"),
+            "next_fire": next_cron_fire(body.cron),
+            "status": "active",
+            "created_at": t.time(),
+            "last_ran": None,
+            "last_result": None,
+        }
+        tasks.append(task)
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("schedule.created", task)
+        return task
+
+    @app.delete("/api/schedules/{sched_id}")
+    def delete_schedule(sched_id: int):
+        from config import save_state
+        tasks = daemon_ref.state.get("scheduled_tasks", [])
+        idx = next((i for i, t in enumerate(tasks) if t.get("id") == sched_id), -1)
+        if idx < 0:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        tasks.pop(idx)
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("schedule.deleted", {"id": sched_id})
+        return {"deleted": True}
+
+    @app.post("/api/schedules/{sched_id}/pause")
+    def pause_schedule(sched_id: int):
+        return _update_schedule_status(daemon_ref, sched_id, "paused")
+
+    @app.post("/api/schedules/{sched_id}/resume")
+    def resume_schedule(sched_id: int):
+        return _update_schedule_status(daemon_ref, sched_id, "active")
+
+    # ---- Watches ----
+
     @app.get("/api/watches")
     def list_watches():
         return {"watches": daemon_ref.state.get("watches", [])}
+
+    @app.post("/api/watches/parse")
+    def parse_watch(body: WatchBody):
+        from watcher import classify_watch
+        from adapters.base import get_login_shell_env
+        env = get_login_shell_env()
+        parsed = classify_watch(body.text, env)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Could not parse watch")
+        return parsed
+
+    @app.post("/api/watches")
+    def create_watch(body: dict):
+        import time as t
+        from config import save_state
+        watches = daemon_ref.state.setdefault("watches", [])
+        watch_id = max([w.get("id", 0) for w in watches], default=0) + 1
+        watch = {
+            "id": watch_id,
+            "target": body.get("target", ""),
+            "check_type": body.get("check_type", "generic"),
+            "description": body.get("description", body.get("target", "watch")),
+            "interval_minutes": body.get("interval_minutes", 5),
+            "status": "active",
+            "created_at": t.time(),
+            "last_check": None,
+            "last_state": None,
+            "alert_count": 0,
+            "cooldown_until": 0,
+        }
+        watches.append(watch)
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("watch.created", watch)
+        return watch
+
+    @app.delete("/api/watches/{watch_id}")
+    def delete_watch(watch_id: int):
+        from config import save_state
+        watches = daemon_ref.state.get("watches", [])
+        idx = next((i for i, w in enumerate(watches) if w.get("id") == watch_id), -1)
+        if idx < 0:
+            raise HTTPException(status_code=404, detail="Watch not found")
+        watches.pop(idx)
+        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("watch.deleted", {"id": watch_id})
+        return {"deleted": True}
+
+    @app.post("/api/watches/{watch_id}/pause")
+    def pause_watch(watch_id: int):
+        return _update_watch_status(daemon_ref, watch_id, "paused")
+
+    @app.post("/api/watches/{watch_id}/resume")
+    def resume_watch(watch_id: int):
+        return _update_watch_status(daemon_ref, watch_id, "active")
+
+    # ---- Activity feed ----
+
+    @app.get("/api/activity")
+    def get_activity():
+        """Recent events + session history timeline."""
+        sessions = session_manager.list()
+        events = []
+        for s in sessions:
+            for msg in s.message_history[-20:]:
+                events.append({
+                    "type": "message",
+                    "session_id": s.id,
+                    "session_title": s.title,
+                    "role": msg["role"],
+                    "text": msg["text"][:200],
+                    "timestamp": msg["timestamp"],
+                })
+        events.sort(key=lambda e: e["timestamp"], reverse=True)
+        return {"events": events[:50]}
 
     # ---- Dashboard ----
 
@@ -247,6 +440,30 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             return HTMLResponse(_fallback_html())
 
     return app
+
+
+def _update_schedule_status(daemon_ref, sched_id: int, status: str):
+    from config import save_state
+    tasks = daemon_ref.state.get("scheduled_tasks", [])
+    for task in tasks:
+        if task.get("id") == sched_id:
+            task["status"] = status
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+            get_event_bus().publish("schedule.updated", task)
+            return task
+    raise HTTPException(status_code=404, detail="Schedule not found")
+
+
+def _update_watch_status(daemon_ref, watch_id: int, status: str):
+    from config import save_state
+    watches = daemon_ref.state.get("watches", [])
+    for watch in watches:
+        if watch.get("id") == watch_id:
+            watch["status"] = status
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+            get_event_bus().publish("watch.updated", watch)
+            return watch
+    raise HTTPException(status_code=404, detail="Watch not found")
 
 
 def _fallback_html() -> str:
