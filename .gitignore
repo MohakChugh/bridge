@@ -4,3 +4,7 @@ __pycache__/
 state.json
 logs/*.log
 config.json
+web/node_modules/
+web/dist/
+__pycache__/
+*.pyc

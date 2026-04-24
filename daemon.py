@@ -30,6 +30,8 @@ from watcher import (
 )
 # Voice transcription removed — high memory, low value
 from sender import send_imessage, OUTBOUND_MARKER
+from session_manager import SessionManager
+from event_bus import get_event_bus
 
 BASE_DIR = os.path.expanduser("~/.claude/imessage-bridge")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -229,6 +231,27 @@ class Daemon:
         self._watch_loop_running = False
         if self.active_session_id:
             log.info(f"Resuming active session: {self.active_session_id}")
+
+        # Multi-session manager (shared with gateway)
+        self.session_manager = SessionManager(
+            config_provider=lambda: self.config,
+            max_parallel=self.config.get("max_parallel_sessions", 4),
+        )
+
+        # Gateway (REST + WebSocket) — optional
+        gateway_cfg = self.config.get("gateway", {})
+        if gateway_cfg.get("enabled", True):
+            try:
+                from gateway import start_gateway
+                port = gateway_cfg.get("port", 7777)
+                start_gateway(
+                    session_manager=self.session_manager,
+                    daemon_ref=self,
+                    port=port,
+                )
+                log.info(f"Gateway started on http://127.0.0.1:{port}")
+            except Exception as e:
+                log.error(f"Failed to start gateway: {e}")
 
         # Slack channel (optional)
         slack_cfg = self.config.get("slack", {})

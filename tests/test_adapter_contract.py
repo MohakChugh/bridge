@@ -20,6 +20,7 @@ from adapters.kiro_adapter import KiroAdapter
 # Sample outputs for each adapter
 CLAUDE_SUCCESS = '{"result": "Hello from Claude", "session_id": "abc-123"}'
 WASABI_SUCCESS = (
+    '{"timestamp":"2026-04-18T12:53:13.000Z","level":"INFO","message":"Prompt: test","sessionId":"xyz"}\n'
     '{"timestamp":"2026-04-18T12:53:13.738Z","level":"INFO","message":"Hello from Wasabi","sessionId":"xyz"}\n'
     '{"timestamp":"2026-04-18T12:53:13.935Z","level":"INFO","message":"Tokens used: 100","sessionId":"xyz"}\n'
 )

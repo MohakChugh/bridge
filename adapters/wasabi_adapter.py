@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import Optional
 import json
+import re
 import shlex
 import subprocess
 
@@ -16,6 +17,8 @@ SKIP_PATTERNS = [
     "Executing tool", "model is asking", "Restoring previous",
     "End workflow", "Reading file", "MCP server",
     "Passing context", "Compacting", "Cache prediction",
+    "disable-continue disables restore", "Memory Reset",
+    "hooks finished", "Tool response:", "Passing --disable",
 ]
 
 BRIEF_PREFIX = (
@@ -23,6 +26,23 @@ BRIEF_PREFIX = (
     "Drop articles, filler, pleasantries. Fragments OK. Short synonyms. "
     "No markdown. Plain text only. Extremely brief. "
 )
+
+
+def _is_tool_output(msg: str) -> bool:
+    """Detect raw tool output that wasabi dumps as INFO messages.
+    These are command results (ls, cat, grep) — not model responses.
+    """
+    lines = msg.strip().split("\n")
+    if len(lines) < 3:
+        return False
+    # ls -la output: lines starting with permissions pattern
+    perm_lines = sum(1 for l in lines if re.match(r'^[drwx\-lst@+]{10}', l.strip()))
+    if perm_lines > 2:
+        return True
+    # total N at start of ls output
+    if lines[0].strip().startswith("total ") and perm_lines > 0:
+        return True
+    return False
 
 
 class WasabiAdapter(BaseAdapter):
@@ -153,8 +173,16 @@ class WasabiAdapter(BaseAdapter):
         return "wasabi"  # fallback to PATH lookup
 
     def _extract_response(self, raw_output: str) -> str:
-        """Extract actual response from wasabi's noisy output."""
+        """Extract actual response from wasabi's noisy output.
+
+        Strategy: only collect messages that appear AFTER the "Prompt:" line.
+        This skips restored conversation context entirely. Then filter out
+        tool execution noise, keeping only the model's text responses.
+        """
         response_lines = []
+        seen_prompt = False
+        in_tool_block = False
+
         for line in raw_output.strip().split("\n"):
             line = line.replace("\x1b[K", "").strip()
             if not line:
@@ -168,7 +196,14 @@ class WasabiAdapter(BaseAdapter):
                 level = obj.get("level", "")
                 msg_type = obj.get("type", "")
 
-                if level == "WARN":
+                if msg.startswith("Prompt:"):
+                    seen_prompt = True
+                    continue
+
+                if not seen_prompt:
+                    continue
+
+                if level in ("WARN", "ERROR"):
                     continue
                 if msg_type == "loading_state":
                     continue
@@ -181,12 +216,35 @@ class WasabiAdapter(BaseAdapter):
                 if not msg.strip():
                     continue
 
-                if level == "ERROR":
-                    continue  # Errors handled separately
+                # Tool execution noise
+                if msg.startswith("────"):
+                    in_tool_block = not in_tool_block
+                    continue
+                if in_tool_block:
+                    continue
+                if msg.startswith("Command:") and len(msg) < 200:
+                    continue
+                if msg.startswith("✓ Auto-approved"):
+                    continue
+                if msg.startswith("Tokens used:"):
+                    continue
+                if "disable-continue disables restore" in msg:
+                    continue
+                if msg.startswith("End workflow"):
+                    continue
+                if "Memory Reset" in msg:
+                    continue
+
+                # Tool output is dumped as raw INFO — detect by structure
+                # (ls output, file contents, etc. appear between tool calls)
+                # Only keep lines that don't look like raw command output
+                if _is_tool_output(msg):
+                    continue
 
                 response_lines.append(msg)
             except json.JSONDecodeError:
-                # Non-JSON line — might be plain text response
+                if not seen_prompt:
+                    continue
                 if line and not line.startswith("[") and not line.startswith("<system"):
                     response_lines.append(line)
 

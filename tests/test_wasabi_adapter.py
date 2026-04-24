@@ -23,6 +23,7 @@ SAMPLE_ERROR_OUTPUT = """{"timestamp":"2026-04-18T12:54:57.271Z","level":"ERROR"
 """
 
 SAMPLE_MULTILINE_OUTPUT = """{"timestamp":"2026-04-18T12:53:05.640Z","level":"INFO","message":"Initializing 5 MCP servers...","sessionId":"abc"}
+{"timestamp":"2026-04-18T12:53:08.550Z","level":"INFO","message":"Prompt: test multi","sessionId":"abc"}
 {"timestamp":"2026-04-18T12:53:08.896Z","level":"INFO","message":"Waiting for response...","sessionId":"abc","type":"loading_state","isLoading":true}
 {"timestamp":"2026-04-18T12:53:13.738Z","level":"INFO","message":"Line one of response","sessionId":"abc"}
 {"timestamp":"2026-04-18T12:53:13.739Z","level":"INFO","message":"Line two of response","sessionId":"abc"}
