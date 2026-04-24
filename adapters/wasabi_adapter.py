@@ -28,6 +28,35 @@ BRIEF_PREFIX = (
 )
 
 
+def _format_history_for_prompt(history: list) -> str:
+    """Render prior messages as plain-text context prefix.
+    history: list of {role, text, timestamp} — newest last.
+    Drops the final entry (that's the current user prompt, already included).
+    """
+    if not history or len(history) < 2:
+        return ""
+    # Keep last N turns to stay under context window
+    recent = history[-10:-1]  # exclude final user entry (current prompt)
+    if not recent:
+        return ""
+    lines = ["PREVIOUS CONVERSATION (for context):"]
+    for msg in recent:
+        role = msg.get("role", "")
+        text = (msg.get("text") or "").strip()
+        if not text:
+            continue
+        # Truncate long responses
+        if len(text) > 800:
+            text = text[:800] + "..."
+        if role == "user":
+            lines.append(f"User: {text}")
+        elif role == "assistant":
+            lines.append(f"You: {text}")
+    lines.append("---")
+    lines.append("CURRENT MESSAGE:")
+    return "\n".join(lines) + "\n\n"
+
+
 def _is_tool_output(msg: str) -> bool:
     """Detect raw tool output that wasabi dumps as INFO messages.
     These are command results (ls, cat, grep) — not model responses.
@@ -74,6 +103,7 @@ class WasabiAdapter(BaseAdapter):
         resume_session_id: Optional[str] = None,
         process_holder: object = None,
         config: Optional[dict] = None,
+        history: Optional[list] = None,
     ) -> dict:
         try:
             cfg = config or {}
@@ -81,8 +111,12 @@ class WasabiAdapter(BaseAdapter):
             account = adapter_cfg.get("account", "YOUR_ACCT_ID")
             model = adapter_cfg.get("model", "global.anthropic.claude-opus-4-6-v1:1m")
 
+            # Wasabi resets memory between non-interactive calls ("End workflow. Memory Reset").
+            # Inject prior conversation into the prompt ourselves to maintain continuity.
+            history_block = _format_history_for_prompt(history or [])
+
             # Prepend brief instruction since wasabi has no --append-system-prompt
-            full_prompt = BRIEF_PREFIX + prompt
+            full_prompt = BRIEF_PREFIX + history_block + prompt
 
             # Use full path — toolbox may not be in launchd's PATH
             wasabi_bin = self._find_wasabi_path()
@@ -121,8 +155,9 @@ class WasabiAdapter(BaseAdapter):
             has_error = self._has_error(stdout)
 
             if response and not has_error:
-                # Wasabi auto-resumes per cwd, no session_id needed
-                return {"success": True, "output": response, "error": "", "session_id": None}
+                # Return "auto" as session_id — signals manager that subsequent calls
+                # should NOT pass --disable-continue (wasabi auto-resumes per cwd).
+                return {"success": True, "output": response, "error": "", "session_id": "auto"}
             elif has_error:
                 error_msg = self._extract_error(stdout) or "Unknown error"
                 return {"success": False, "output": "", "error": error_msg[:200], "session_id": None}

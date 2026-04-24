@@ -82,7 +82,7 @@ def test_spawn_success(adapter):
         result = adapter.spawn("Say hello", "/tmp", timeout=60)
         assert result["success"] is True
         assert "Hello" in result["output"]
-        assert result["session_id"] is None  # wasabi has no session_id
+        assert result["session_id"] == "auto"  # signals subsequent calls to continue
 
 
 def test_spawn_error(adapter):

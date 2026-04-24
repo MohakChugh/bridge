@@ -197,7 +197,7 @@ class SessionManager:
 
             threading.Thread(target=poll_process, daemon=True).start()
 
-            result = adapter.spawn(
+            spawn_kwargs = dict(
                 prompt=prompt,
                 cwd=session.cwd,
                 timeout=timeout,
@@ -205,6 +205,16 @@ class SessionManager:
                 process_holder=holder,
                 config=config,
             )
+            # Pass history for adapters that support it (wasabi needs it)
+            try:
+                import inspect
+                sig = inspect.signature(adapter.spawn)
+                if "history" in sig.parameters:
+                    spawn_kwargs["history"] = list(session.message_history)
+            except Exception:
+                pass
+
+            result = adapter.spawn(**spawn_kwargs)
 
             session.active_process = None
 
