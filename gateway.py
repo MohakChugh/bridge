@@ -79,9 +79,11 @@ class WorkflowBody(BaseModel):
     tool: str = ""
     cwd: str = "/tmp"
     require_approval: bool = False
+    variables: list = []
     nodes: list = []
     edges: list = []
     schedule: Optional[dict] = None
+    schedules: list = []
 
 
 class WorkflowApprovalBody(BaseModel):
