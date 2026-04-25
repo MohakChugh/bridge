@@ -4,15 +4,28 @@ import { api, Session } from "@/api/client";
 import { Button, Textarea, Badge, Card } from "./ui";
 import { useSessionStore } from "@/stores/sessionStore";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { Send, X, Trash2, StopCircle, Plus } from "lucide-react";
+import { Send, X, Trash2, StopCircle, Plus, History, Play, ChevronDown, ChevronUp, MessageSquare } from "lucide-react";
 import { NewSessionDialog } from "./NewSessionDialog";
 
 export function ChatView() {
   const qc = useQueryClient();
   const { activeSessionId, setActiveSessionId } = useSessionStore();
+  const [showArchived, setShowArchived] = useState(false);
 
   const { data: sessionsData } = useQuery({ queryKey: ["sessions"], queryFn: api.sessions.list });
   const sessions = sessionsData?.sessions ?? [];
+
+  const { data: archivedData } = useQuery({ queryKey: ["sessions-archived"], queryFn: api.sessions.archived });
+  const archived = archivedData?.sessions ?? [];
+
+  const resumeMut = useMutation({
+    mutationFn: (id: string) => api.sessions.resume(id),
+    onSuccess: (session) => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["sessions-archived"] });
+      setActiveSessionId(session.id);
+    },
+  });
 
   // Auto-pick first session if none active
   useEffect(() => {
@@ -34,7 +47,51 @@ export function ChatView() {
         <div className="ml-1">
           <NewSessionDialog onCreated={(id) => setActiveSessionId(id)} />
         </div>
+        {archived.length > 0 && (
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className="ml-2 flex items-center gap-1 px-2 py-1 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent shrink-0"
+          >
+            <History className="w-3 h-3" />
+            Past ({archived.length})
+            {showArchived ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+        )}
       </div>
+
+      {/* Archived sessions dropdown */}
+      {showArchived && archived.length > 0 && (
+        <div className="border-b border-border bg-card/50 px-3 py-2 max-h-48 overflow-y-auto">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Past sessions</div>
+          <div className="space-y-1">
+            {archived.slice(0, 20).map((s: any) => {
+              const lastMsg = s.message_history?.[s.message_history.length - 1];
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => { resumeMut.mutate(s.id); setShowArchived(false); }}
+                  disabled={resumeMut.isPending}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left group"
+                >
+                  <MessageSquare className="w-3 h-3 text-muted-foreground shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-medium truncate">{s.title}</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-muted text-muted-foreground">{s.tool}</span>
+                      <span className="text-[9px] text-muted-foreground">{s.message_count || s.message_history?.length || 0} msgs</span>
+                    </div>
+                    {lastMsg && (
+                      <div className="text-[10px] text-muted-foreground truncate mt-0.5">{lastMsg.text?.slice(0, 80)}</div>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-muted-foreground shrink-0">{formatRelativeTime(s.updated_at || s.created_at)}</span>
+                  <Play className="w-3 h-3 text-primary opacity-0 group-hover:opacity-100 shrink-0" />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {activeSessionId ? (
         <ActiveChatPane sessionId={activeSessionId} />
