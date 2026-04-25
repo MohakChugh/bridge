@@ -130,6 +130,24 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def list_sessions():
         return {"sessions": [s.to_dict() for s in session_manager.list()]}
 
+    @app.get("/api/sessions/archived")
+    def list_archived_sessions():
+        return {"sessions": session_manager.list_archived()}
+
+    @app.post("/api/sessions/archived/{sid}/resume")
+    def resume_archived_session(sid: str):
+        session = session_manager.resume(sid)
+        if not session:
+            raise HTTPException(status_code=404, detail="Archived session not found")
+        return session.to_dict()
+
+    @app.delete("/api/sessions/archived/{sid}")
+    def delete_archived_session(sid: str):
+        ok = session_manager.delete_archived(sid)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Archived session not found")
+        return {"deleted": True}
+
     @app.post("/api/sessions")
     def create_session(body: CreateSessionBody):
         if not os.path.isdir(body.cwd):

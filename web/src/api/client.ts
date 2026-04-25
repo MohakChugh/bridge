@@ -21,6 +21,9 @@ export const api = {
 
   sessions: {
     list: () => request<{ sessions: Session[] }>("/sessions"),
+    archived: () => request<{ sessions: Session[] }>("/sessions/archived"),
+    resume: (id: string) => request<Session>(`/sessions/archived/${id}/resume`, { method: "POST" }),
+    deleteArchived: (id: string) => request<{ deleted: boolean }>(`/sessions/archived/${id}`, { method: "DELETE" }),
     get: (id: string) => request<Session>(`/sessions/${id}`),
     create: (body: { tool: string; cwd: string; title?: string }) =>
       request<Session>("/sessions", { method: "POST", body: JSON.stringify(body) }),

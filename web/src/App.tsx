@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { Dashboard } from "@/components/Dashboard";
 import { ChatView } from "@/components/ChatView";
 import { RemindersList, SchedulesList, WatchesList } from "@/components/SimpleList";
+import { SessionHistory } from "@/components/SessionHistory";
 import { WorkflowList } from "@/components/WorkflowList";
 import { WorkflowEditor } from "@/components/WorkflowEditor";
 import { WorkflowRunner } from "@/components/WorkflowRunner";
@@ -20,6 +21,7 @@ export default function App() {
         {view === "dashboard" && <Dashboard />}
         {view === "operations" && <OperationsDashboard />}
         {view === "chat" && <ChatView />}
+        {view === "sessions" && <SessionHistory />}
         {view === "workflows" && <WorkflowList />}
         {view === "workflow-editor" && <WorkflowEditor />}
         {view === "workflow-runner" && <WorkflowRunner />}

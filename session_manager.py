@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable
 
 from event_bus import get_event_bus
+import session_store
 
 log = logging.getLogger("session_manager")
 
@@ -239,6 +240,7 @@ class SessionManager:
 
             session.current_task = None
             session.updated_at = time.time()
+            self._persist_session(session)
 
             if on_complete:
                 try:
@@ -253,13 +255,55 @@ class SessionManager:
             session.current_task = None
             session.active_process = None
             session.updated_at = time.time()
+            self._persist_session(session)
             self._bus.publish("session.failed", {
                 "id": session.id,
                 "error": str(e),
             })
 
+    def _persist_session(self, session: Session) -> None:
+        try:
+            session_store.save_session(session.to_dict())
+        except Exception as e:
+            log.warning(f"Failed to persist session {session.id}: {e}")
+
+    def persist_all(self) -> None:
+        with self._lock:
+            for session in self._sessions.values():
+                self._persist_session(session)
+
+    def list_archived(self) -> list[dict]:
+        active_ids = set(self._sessions.keys())
+        return [s for s in session_store.load_sessions() if s.get("id") not in active_ids]
+
+    def resume(self, archived_id: str) -> Optional[Session]:
+        archived = session_store.get_session(archived_id)
+        if not archived:
+            return None
+        session = Session(
+            id=archived["id"],
+            title=archived.get("title", "Resumed session"),
+            tool=archived.get("tool", "wasabi"),
+            cwd=archived.get("cwd", "/tmp"),
+            status="idle",
+            tool_session_id=archived.get("tool_session_id"),
+            created_at=archived.get("created_at", time.time()),
+            updated_at=time.time(),
+            message_history=archived.get("message_history", []),
+            last_output=archived.get("last_output"),
+            last_error=None,
+        )
+        with self._lock:
+            self._sessions[session.id] = session
+            self._session_locks[session.id] = threading.Lock()
+        self._bus.publish("session.resumed", session.to_dict())
+        log.info(f"Session resumed: {session.id} ({session.title})")
+        return session
+
+    def delete_archived(self, sid: str) -> bool:
+        return session_store.delete_session(sid)
+
     def snapshot(self) -> dict:
-        """Dashboard snapshot — all sessions with summary."""
         with self._lock:
             sessions = [s.to_dict() for s in self._sessions.values()]
         busy = sum(1 for s in sessions if s["status"] == "busy")

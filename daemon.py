@@ -1792,6 +1792,11 @@ class Daemon:
 
     def stop(self) -> None:
         self.running = False
+        if hasattr(self, 'session_manager'):
+            try:
+                self.session_manager.persist_all()
+            except Exception as e:
+                log.warning(f"Failed to persist sessions on shutdown: {e}")
         if self._slack_channel:
             try:
                 self._slack_channel.stop()
