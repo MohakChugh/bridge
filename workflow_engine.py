@@ -1,22 +1,33 @@
-"""Workflow DAG executor — runs workflows as single-session conversations."""
+"""Workflow DAG executor — runs workflows as single-session conversations.
+
+Supports: start, prompt, branch (conditional + parallel), merge, delay,
+approval (human gate), notify (iMessage/Slack), end.
+
+Persists runs to workflow_runs.json so history survives daemon restarts.
+Orphaned runs (daemon died mid-execution) are marked as failed on load.
+"""
 
 from __future__ import annotations
+import json
 import logging
+import os
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 from event_bus import get_event_bus
 
 log = logging.getLogger("workflow_engine")
 
+RUNS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow_runs.json")
+
 
 @dataclass
 class NodeState:
-    status: str = "pending"  # pending | running | completed | failed | skipped
+    status: str = "pending"
     output: Optional[str] = None
     error: Optional[str] = None
     started_at: Optional[float] = None
@@ -37,7 +48,7 @@ class WorkflowRun:
     id: str
     workflow_id: str
     workflow_name: str
-    status: str = "pending"  # pending | running | paused | completed | failed | aborted
+    status: str = "pending"
     node_states: dict[str, NodeState] = field(default_factory=dict)
     session_id: Optional[str] = None
     started_at: float = field(default_factory=time.time)
@@ -55,15 +66,77 @@ class WorkflowRun:
             "completed_at": self.completed_at,
         }
 
+    @staticmethod
+    def from_dict(d: dict) -> "WorkflowRun":
+        r = WorkflowRun(
+            id=d["id"],
+            workflow_id=d["workflow_id"],
+            workflow_name=d.get("workflow_name", ""),
+            status=d.get("status", "completed"),
+            session_id=d.get("session_id"),
+            started_at=d.get("started_at", 0),
+            completed_at=d.get("completed_at"),
+        )
+        for nid, ns_d in d.get("node_states", {}).items():
+            ns = NodeState(
+                status=ns_d.get("status", "pending"),
+                output=ns_d.get("output"),
+                error=ns_d.get("error"),
+                started_at=ns_d.get("started_at"),
+                completed_at=ns_d.get("completed_at"),
+            )
+            r.node_states[nid] = ns
+        return r
+
+
+def _load_runs(path: str = RUNS_PATH) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_runs(runs: list[dict], path: str = RUNS_PATH) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(runs, f, separators=(",", ":"))
+    os.replace(tmp, path)
+
 
 class WorkflowEngine:
-    def __init__(self, session_manager, config_provider: Callable):
+    def __init__(self, session_manager, config_provider: Callable, daemon_ref: Any = None):
         self._session_manager = session_manager
         self._config_provider = config_provider
+        self._daemon_ref = daemon_ref
         self._bus = get_event_bus()
         self._runs: dict[str, WorkflowRun] = {}
         self._approval_events: dict[str, threading.Event] = {}
         self._abort_flags: dict[str, bool] = {}
+        self._persist_lock = threading.Lock()
+        self._load_history()
+
+    def _load_history(self) -> None:
+        for rd in _load_runs():
+            r = WorkflowRun.from_dict(rd)
+            if r.status in ("running", "paused", "pending"):
+                r.status = "failed"
+                r.completed_at = r.completed_at or time.time()
+                for ns in r.node_states.values():
+                    if ns.status == "running":
+                        ns.status = "failed"
+                        ns.error = "Daemon restarted"
+                        ns.completed_at = ns.completed_at or time.time()
+            self._runs[r.id] = r
+        log.info(f"Loaded {len(self._runs)} workflow run(s) from history")
+
+    def _persist(self) -> None:
+        with self._persist_lock:
+            all_runs = [r.to_dict() for r in self._runs.values()]
+            all_runs.sort(key=lambda r: r.get("started_at", 0), reverse=True)
+            _save_runs(all_runs[:200])
 
     def run(self, workflow: dict) -> WorkflowRun:
         run_id = str(uuid.uuid4())
@@ -77,6 +150,7 @@ class WorkflowEngine:
 
         self._runs[run_id] = wf_run
         self._abort_flags[run_id] = False
+        self._persist()
 
         thread = threading.Thread(
             target=self._execute_dag,
@@ -105,40 +179,42 @@ class WorkflowEngine:
             self._session_manager.cancel(wf_run.session_id)
         wf_run.status = "aborted"
         wf_run.completed_at = time.time()
+        self._persist()
         self._bus.publish("workflow.run.completed", wf_run.to_dict())
         return True
 
     def get_run(self, run_id: str) -> Optional[WorkflowRun]:
         return self._runs.get(run_id)
 
-    def list_runs(self, workflow_id: str) -> list[WorkflowRun]:
-        return [r for r in self._runs.values() if r.workflow_id == workflow_id]
+    def list_runs(self, workflow_id: Optional[str] = None) -> list[WorkflowRun]:
+        if workflow_id:
+            return [r for r in self._runs.values() if r.workflow_id == workflow_id]
+        return sorted(self._runs.values(), key=lambda r: r.started_at, reverse=True)
 
     def _execute_dag(self, wf_run: WorkflowRun, workflow: dict) -> None:
         wf_run.status = "running"
+        self._persist()
         self._bus.publish("workflow.run.started", wf_run.to_dict())
 
         nodes = {n["id"]: n for n in workflow.get("nodes", [])}
         edges = workflow.get("edges", [])
 
-        # Build adjacency + reverse
-        children = defaultdict(list)  # node_id -> [(edge, target_id)]
-        parents = defaultdict(list)   # node_id -> [source_id]
+        children = defaultdict(list)
+        parents = defaultdict(list)
         for edge in edges:
             children[edge["source"]].append((edge, edge["target"]))
             parents[edge["target"]].append(edge["source"])
 
-        # Create session
         tool = workflow.get("tool", self._config_provider().get("cli_tool", "wasabi"))
         cwd = workflow.get("cwd", self._config_provider()["directories"].get("default", "/tmp"))
         session = self._session_manager.create(tool=tool, cwd=cwd, title=f"WF: {workflow.get('name', '')}")
         wf_run.session_id = session.id
 
-        # Find start node
         start_nodes = [nid for nid, n in nodes.items() if n.get("type") == "start"]
         if not start_nodes:
             wf_run.status = "failed"
             wf_run.completed_at = time.time()
+            self._persist()
             self._bus.publish("workflow.run.completed", wf_run.to_dict())
             return
 
@@ -151,6 +227,7 @@ class WorkflowEngine:
             wf_run.status = "failed"
         finally:
             wf_run.completed_at = time.time()
+            self._persist()
             self._bus.publish("workflow.run.completed", wf_run.to_dict())
 
     def _walk(self, wf_run, nodes, children, parents, node_id, session_id):
@@ -165,15 +242,15 @@ class WorkflowEngine:
         if not ns or ns.status in ("completed", "failed", "skipped"):
             return
 
-        # Check all parents completed (merge barrier)
         parent_ids = [pid for pid in parents.get(node_id, []) if pid in nodes]
         for pid in parent_ids:
             ps = wf_run.node_states.get(pid)
             if ps and ps.status not in ("completed", "skipped"):
-                return  # Not ready yet
+                return
 
         ns.status = "running"
         ns.started_at = time.time()
+        self._persist()
         self._bus.publish("workflow.node.started", {
             "run_id": wf_run.id, "node_id": node_id, "node_type": node["type"],
         })
@@ -183,6 +260,7 @@ class WorkflowEngine:
             if ns.status == "running":
                 ns.status = "completed"
             ns.completed_at = time.time()
+            self._persist()
             self._bus.publish("workflow.node.completed", {
                 "run_id": wf_run.id, "node_id": node_id, "output": ns.output,
             })
@@ -190,6 +268,7 @@ class WorkflowEngine:
             ns.status = "failed"
             ns.error = str(e)
             ns.completed_at = time.time()
+            self._persist()
             self._bus.publish("workflow.node.failed", {
                 "run_id": wf_run.id, "node_id": node_id, "error": str(e),
             })
@@ -199,7 +278,6 @@ class WorkflowEngine:
         if self._abort_flags.get(wf_run.id):
             return
 
-        # Follow outgoing edges
         outgoing = children.get(node_id, [])
         node_type = node.get("type")
 
@@ -238,30 +316,103 @@ class WorkflowEngine:
             time.sleep(seconds)
             ns.output = f"Waited {seconds}s"
 
+        elif node_type == "notify":
+            self._execute_notify(wf_run, node, ns)
+
         elif node_type == "approval":
-            if not wf_run.workflow_id:
-                return
-            message = data.get("message", "Approval required")
+            self._execute_approval(wf_run, node, ns)
+
+    def _execute_notify(self, wf_run, node, ns):
+        data = node.get("data", {})
+        channel = data.get("channel", "imessage")
+        message = data.get("message", "Workflow notification")
+        wait_for_ack = data.get("wait_for_ack", False)
+
+        sent_to = []
+
+        if channel in ("imessage", "both"):
+            if self._daemon_ref and hasattr(self._daemon_ref, '_imessage_enabled') and self._daemon_ref._imessage_enabled:
+                try:
+                    from sender import send_imessage
+                    guid = self._daemon_ref.config.get("reply_chat_guid")
+                    if guid:
+                        send_imessage(guid, f"[Workflow: {wf_run.workflow_name}] {message}")
+                        sent_to.append("iMessage")
+                except Exception as e:
+                    log.warning(f"Notify iMessage failed: {e}")
+
+        if channel in ("slack", "both"):
+            if self._daemon_ref and hasattr(self._daemon_ref, '_slack_channel') and self._daemon_ref._slack_channel:
+                try:
+                    slack_cfg = self._daemon_ref.config.get("slack", {})
+                    allowed = slack_cfg.get("allowed_users", [])
+                    if allowed:
+                        for uid in allowed:
+                            try:
+                                result = self._daemon_ref._slack_channel.app.client.conversations_open(users=uid)
+                                dm_channel = result["channel"]["id"]
+                                self._daemon_ref._slack_channel.app.client.chat_postMessage(
+                                    channel=dm_channel,
+                                    text=f"*[Workflow: {wf_run.workflow_name}]* {message}",
+                                )
+                                sent_to.append("Slack")
+                                break
+                            except Exception as e:
+                                log.warning(f"Notify Slack DM failed for {uid}: {e}")
+                except Exception as e:
+                    log.warning(f"Notify Slack failed: {e}")
+
+        ns.output = f"Sent to: {', '.join(sent_to) or 'none'}"
+        self._bus.publish("workflow.notify.sent", {
+            "run_id": wf_run.id,
+            "node_id": node["id"],
+            "channel": channel,
+            "message": message,
+            "sent_to": sent_to,
+        })
+
+        if wait_for_ack:
             wf_run.status = "paused"
             evt = threading.Event()
             self._approval_events[wf_run.id] = evt
+            self._persist()
             self._bus.publish("workflow.approval_needed", {
                 "run_id": wf_run.id,
                 "node_id": node["id"],
-                "message": message,
+                "message": f"Notification sent. Waiting for acknowledgment.",
                 "workflow_name": wf_run.workflow_name,
             })
-            log.info(f"Workflow paused at approval node: {message}")
             evt.wait()
             del self._approval_events[wf_run.id]
-
             if self._abort_flags.get(wf_run.id):
                 ns.status = "failed"
-                ns.error = "Aborted by user"
+                ns.error = "Aborted"
                 raise Exception("Aborted by user")
-
             wf_run.status = "running"
-            ns.output = "Approved"
+            ns.output += " (acknowledged)"
+
+    def _execute_approval(self, wf_run, node, ns):
+        data = node.get("data", {})
+        message = data.get("message", "Approval required")
+        wf_run.status = "paused"
+        evt = threading.Event()
+        self._approval_events[wf_run.id] = evt
+        self._persist()
+        self._bus.publish("workflow.approval_needed", {
+            "run_id": wf_run.id,
+            "node_id": node["id"],
+            "message": message,
+            "workflow_name": wf_run.workflow_name,
+        })
+        log.info(f"Workflow paused at approval node: {message}")
+        evt.wait()
+        del self._approval_events[wf_run.id]
+        if self._abort_flags.get(wf_run.id):
+            ns.status = "failed"
+            ns.error = "Aborted by user"
+            raise Exception("Aborted by user")
+        wf_run.status = "running"
+        ns.output = "Approved"
 
     def _run_prompt(self, session_id: str, prompt: str) -> str:
         session = self._session_manager.get(session_id)

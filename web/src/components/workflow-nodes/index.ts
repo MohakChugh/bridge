@@ -5,6 +5,7 @@ import { BranchNode } from "./BranchNode";
 import { MergeNode } from "./MergeNode";
 import { DelayNode } from "./DelayNode";
 import { ApprovalNode } from "./ApprovalNode";
+import { NotifyNode } from "./NotifyNode";
 import { EndNode } from "./EndNode";
 
 export const nodeTypes: NodeTypes = {
@@ -14,11 +15,13 @@ export const nodeTypes: NodeTypes = {
   merge: MergeNode,
   delay: DelayNode,
   approval: ApprovalNode,
+  notify: NotifyNode,
   end: EndNode,
 };
 
 export const NODE_MENU = [
   { type: "prompt", label: "Prompt", color: "bg-primary/20 text-primary" },
+  { type: "notify", label: "Notify", color: "bg-primary/20 text-primary" },
   { type: "branch", label: "Branch", color: "bg-warning/20 text-warning" },
   { type: "merge", label: "Merge", color: "bg-warning/20 text-warning" },
   { type: "delay", label: "Delay", color: "bg-muted text-muted-foreground" },

@@ -387,7 +387,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
 
     from workflow_store import load_workflows, get_workflow as _get_wf, upsert_workflow, delete_workflow as _del_wf, WORKFLOWS_PATH
     from workflow_engine import WorkflowEngine
-    wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config)
+    wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config, daemon_ref=daemon_ref)
 
     @app.get("/api/workflows")
     def list_workflows():
@@ -447,6 +447,53 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def abort_workflow_run(wf_id: str, run_id: str):
         ok = wf_engine.abort(run_id)
         return {"aborted": ok}
+
+    @app.get("/api/workflow-runs")
+    def list_all_workflow_runs():
+        runs = wf_engine.list_runs()
+        return {"runs": [r.to_dict() for r in runs[:50]]}
+
+    @app.get("/api/operations")
+    def get_operations():
+        """Unified snapshot: running workflows + active sessions + watches + schedules."""
+        all_runs = wf_engine.list_runs()
+        running_runs = [r.to_dict() for r in all_runs if r.status in ("running", "paused")]
+        recent_runs = [r.to_dict() for r in all_runs[:20]]
+        sessions = [s.to_dict() for s in session_manager.list()]
+        state = daemon_ref.state
+
+        scheduled_workflows = []
+        for wf in load_workflows(WORKFLOWS_PATH):
+            if wf.get("schedule"):
+                scheduled_workflows.append({
+                    "id": wf["id"],
+                    "name": wf["name"],
+                    "schedule": wf["schedule"],
+                    "tool": wf.get("tool"),
+                })
+
+        return {
+            "running_workflows": running_runs,
+            "recent_runs": recent_runs,
+            "scheduled_workflows": scheduled_workflows,
+            "sessions": {
+                "total": len(sessions),
+                "busy": sum(1 for s in sessions if s["status"] == "busy"),
+                "items": sessions,
+            },
+            "watches": {
+                "total": len(state.get("watches", [])),
+                "active": [w for w in state.get("watches", []) if w.get("status") == "active"],
+            },
+            "schedules": {
+                "total": len(state.get("scheduled_tasks", [])),
+                "active": [s for s in state.get("scheduled_tasks", []) if s.get("status") == "active"],
+            },
+            "reminders": {
+                "total": len(state.get("reminders", [])),
+            },
+            "timestamp": time.time(),
+        }
 
     # ---- WebSocket ----
 

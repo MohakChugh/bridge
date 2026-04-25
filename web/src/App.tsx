@@ -7,6 +7,7 @@ import { RemindersList, SchedulesList, WatchesList } from "@/components/SimpleLi
 import { WorkflowList } from "@/components/WorkflowList";
 import { WorkflowEditor } from "@/components/WorkflowEditor";
 import { WorkflowRunner } from "@/components/WorkflowRunner";
+import { OperationsDashboard } from "@/components/OperationsDashboard";
 
 export default function App() {
   useEventStream();
@@ -17,6 +18,7 @@ export default function App() {
       <Sidebar />
       <main className="flex-1 overflow-hidden">
         {view === "dashboard" && <Dashboard />}
+        {view === "operations" && <OperationsDashboard />}
         {view === "chat" && <ChatView />}
         {view === "workflows" && <WorkflowList />}
         {view === "workflow-editor" && <WorkflowEditor />}

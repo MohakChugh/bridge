@@ -76,7 +76,7 @@ export function WorkflowEditor() {
       id,
       type,
       position: { x: 250 + Math.random() * 100, y: 150 + nodes.length * 80 },
-      data: type === "prompt" ? { prompt: "" } : type === "branch" ? { branch_type: "conditional", condition: "" } : type === "delay" ? { seconds: 60 } : type === "approval" ? { message: "Approval required" } : {},
+      data: type === "prompt" ? { prompt: "" } : type === "branch" ? { branch_type: "conditional", condition: "" } : type === "delay" ? { seconds: 60 } : type === "approval" ? { message: "Approval required" } : type === "notify" ? { channel: "imessage", message: "", wait_for_ack: false } : {},
     };
     setNodes((nds) => [...nds, newNode]);
   };
@@ -254,6 +254,41 @@ export function WorkflowEditor() {
                     rows={3}
                   />
                 </div>
+              )}
+              {selectedNode.type === "notify" && (
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Channel</label>
+                    <select
+                      value={(selectedNode.data as any)?.channel || "imessage"}
+                      onChange={(e) => updateNodeData(selectedNode.id, { channel: e.target.value })}
+                      className="w-full h-9 rounded-md border border-border bg-transparent px-3 text-sm"
+                    >
+                      <option value="imessage">iMessage</option>
+                      <option value="slack">Slack</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Message</label>
+                    <Textarea
+                      value={(selectedNode.data as any)?.message || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { message: e.target.value })}
+                      placeholder="Notification message..."
+                      rows={4}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="wait-ack"
+                      checked={(selectedNode.data as any)?.wait_for_ack || false}
+                      onChange={(e) => updateNodeData(selectedNode.id, { wait_for_ack: e.target.checked })}
+                      className="rounded border-border"
+                    />
+                    <label htmlFor="wait-ack" className="text-xs text-muted-foreground">Wait for acknowledgment</label>
+                  </div>
+                </>
               )}
             </div>
           </div>
