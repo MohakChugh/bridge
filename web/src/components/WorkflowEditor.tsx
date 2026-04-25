@@ -26,17 +26,32 @@ import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 import { FeedbackPanel } from "./FeedbackPanel";
 
 export function WorkflowEditor() {
-  const { activeWorkflowId, setView, setActiveWorkflowId, setActiveRunId } = useSessionStore();
-  const qc = useQueryClient();
+  const { activeWorkflowId } = useSessionStore();
 
-  const { data: existingWf } = useQuery({
+  const { data: initialWf, isLoading } = useQuery({
     queryKey: ["workflow", activeWorkflowId],
     queryFn: () => (activeWorkflowId ? api.workflows.get(activeWorkflowId) : null),
     enabled: !!activeWorkflowId,
   });
+
+  if (activeWorkflowId && isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+        Loading workflow...
+      </div>
+    );
+  }
+
+  // Key forces remount when workflow changes — ensures fresh hook state
+  return <WorkflowEditorInner key={activeWorkflowId || "new"} initialWf={initialWf} />;
+}
+
+function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
+  const { activeWorkflowId, setView, setActiveWorkflowId, setActiveRunId } = useSessionStore();
+  const qc = useQueryClient();
   const { data: dirsData } = useQuery({ queryKey: ["directories"], queryFn: api.directories });
 
-  const rawNodes: Node[] = existingWf?.nodes?.map((n: any) => ({
+  const rawNodes: Node[] = initialWf?.nodes?.map((n: any) => ({
     id: n.id,
     type: n.type,
     position: n.position || { x: 0, y: 0 },
@@ -46,7 +61,7 @@ export function WorkflowEditor() {
     { id: "end-1", type: "end", position: { x: 250, y: 400 }, data: {} },
   ];
 
-  const rawEdges: Edge[] = existingWf?.edges?.map((e: any) => ({
+  const rawEdges: Edge[] = initialWf?.edges?.map((e: any) => ({
     id: e.id || `e-${e.source}-${e.target}`,
     source: e.source,
     target: e.target,
@@ -63,9 +78,9 @@ export function WorkflowEditor() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState(defaultNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(defaultEdges);
-  const [wfName, setWfName] = useState(existingWf?.name || "New Workflow");
-  const [wfTool, setWfTool] = useState(existingWf?.tool || "wasabi");
-  const [wfCwd, setWfCwd] = useState(existingWf?.cwd || Object.values(dirsData || {})[0] || "/tmp");
+  const [wfName, setWfName] = useState(initialWf?.name || "New Workflow");
+  const [wfTool, setWfTool] = useState(initialWf?.tool || "wasabi");
+  const [wfCwd, setWfCwd] = useState(initialWf?.cwd || Object.values(dirsData || {})[0] || "/tmp");
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
