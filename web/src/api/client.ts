@@ -73,6 +73,12 @@ export const api = {
   },
   activity: () => request<{ events: any[] }>("/activity"),
 
+  personas: {
+    list: () => request<{ personas: any[] }>("/personas"),
+    create: (body: any) => request<any>("/personas", { method: "POST", body: JSON.stringify(body) }),
+    delete: (name: string) => request<any>(`/personas/${name}`, { method: "DELETE" }),
+  },
+
   memory: {
     collections: () => request<{ collections: any[] }>("/memory/collections"),
     createCollection: (name: string, description?: string) =>

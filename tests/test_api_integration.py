@@ -771,3 +771,185 @@ class TestAdapterRegistry:
         assert get_adapter("claude").name() == "claude"
         assert get_adapter("wasabi").name() == "wasabi"
         assert get_adapter("kiro").name() == "kiro"
+
+
+# ---- 16. Shared Memory Tests ----
+
+class TestSharedMemory:
+    def test_create_collection(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            cid = mem.create_collection("test_coll", "Test collection")
+            assert cid > 0
+            collections = mem.list_collections()
+            assert any(c["name"] == "test_coll" for c in collections)
+            mem.delete_collection("test_coll")
+            assert not any(c["name"] == "test_coll" for c in mem.list_collections())
+        finally:
+            os.unlink(path)
+
+    def test_add_and_search(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            mem.add("Pipeline X is blocked due to IAM permission", "test_search")
+            mem.add("DDB throttling fixed by increasing WCU", "test_search")
+            mem.add("Auth handler uses CloudAuth with token refresh", "test_search")
+            results = mem.search("pipeline failing", collections=["test_search"], limit=3)
+            assert len(results) > 0
+            assert results[0]["score"] > 0
+            assert "Pipeline" in results[0]["text"]
+            mem.delete_collection("test_search")
+        finally:
+            os.unlink(path)
+
+    def test_cross_collection_search(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            mem.add("Pipeline health check OK", "project_a")
+            mem.add("Pipeline is blocked", "project_b")
+            results = mem.search("pipeline status", limit=5)
+            assert len(results) >= 2
+            collections_found = {r["collection"] for r in results}
+            assert "project_a" in collections_found
+            assert "project_b" in collections_found
+            mem.delete_collection("project_a")
+            mem.delete_collection("project_b")
+        finally:
+            os.unlink(path)
+
+    def test_stats(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            mem.add("test entry 1", "test_stats")
+            mem.add("test entry 2", "test_stats")
+            stats = mem.stats()
+            assert stats["total_entries"] == 2
+            assert stats["collections"]["test_stats"] == 2
+            mem.delete_collection("test_stats")
+        finally:
+            os.unlink(path)
+
+    def test_delete_entry(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            mid = mem.add("entry to delete", "test_del")
+            assert mem.delete(mid) is True
+            assert mem.stats()["total_entries"] == 0
+            mem.delete_collection("test_del")
+        finally:
+            os.unlink(path)
+
+    def test_import_file(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("This is test content for import. " * 5)
+            txt_path = f.name
+        try:
+            mem = SharedMemory(db_path)
+            count = mem.import_file(txt_path, "test_import", chunk_size=100)
+            assert count > 0
+            mem.delete_collection("test_import")
+        finally:
+            os.unlink(db_path)
+            os.unlink(txt_path)
+
+    def test_list_entries(self):
+        from shared_memory import SharedMemory
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            mem = SharedMemory(path)
+            mem.add("entry 1", "test_list")
+            mem.add("entry 2", "test_list")
+            entries = mem.list_entries("test_list")
+            assert len(entries) == 2
+            mem.delete_collection("test_list")
+        finally:
+            os.unlink(path)
+
+
+# ---- 17. Memory API Endpoint Tests ----
+
+class TestMemoryAPI:
+    def test_memory_stats(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/memory/stats")
+        assert r.status_code == 200
+        assert "total_entries" in r.json()
+
+    def test_memory_collections_list(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/memory/collections")
+        assert r.status_code == 200
+        assert "collections" in r.json()
+
+    def test_memory_create_collection(self, app_client):
+        client, _, _ = app_client
+        r = client.post("/api/memory/collections", json={"name": "test_api_coll"})
+        assert r.status_code == 200
+        client.delete("/api/memory/collections/test_api_coll")
+
+    def test_memory_add_and_search(self, app_client):
+        client, _, _ = app_client
+        client.post("/api/memory/collections", json={"name": "test_api_search"})
+        client.post("/api/memory/add", json={"text": "test memory entry about pipelines", "collection": "test_api_search"})
+        r = client.post("/api/memory/search", json={"query": "pipelines", "collections": ["test_api_search"]})
+        assert r.status_code == 200
+        assert len(r.json()["results"]) > 0
+        client.delete("/api/memory/collections/test_api_search")
+
+    def test_memory_entries(self, app_client):
+        client, _, _ = app_client
+        client.post("/api/memory/collections", json={"name": "test_api_entries"})
+        client.post("/api/memory/add", json={"text": "test entry", "collection": "test_api_entries"})
+        r = client.get("/api/memory/entries/test_api_entries")
+        assert r.status_code == 200
+        assert len(r.json()["entries"]) > 0
+        client.delete("/api/memory/collections/test_api_entries")
+
+
+# ---- 18. Personas API Tests ----
+
+class TestPersonasAPI:
+    def test_list_personas(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/personas")
+        assert r.status_code == 200
+        assert "personas" in r.json()
+
+    def test_create_persona(self, app_client):
+        client, daemon, _ = app_client
+        r = client.post("/api/personas", json={
+            "name": "test_persona",
+            "system_prompt": "You are a test assistant",
+            "collections": ["test"],
+            "tool": "wasabi",
+        })
+        assert r.status_code == 200
+        assert r.json()["name"] == "test_persona"
+        # Cleanup
+        client.delete("/api/personas/test_persona")

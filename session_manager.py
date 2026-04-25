@@ -285,6 +285,16 @@ class SessionManager:
             session_store.save_session(session.to_dict())
         except Exception as e:
             log.warning(f"Failed to persist session {session.id}: {e}")
+        # Auto-ingest to shared memory
+        if session.last_output and len(session.last_output) > 30:
+            try:
+                from shared_memory import get_shared_memory
+                mem = get_shared_memory()
+                summary = f"Session '{session.title}' ({session.tool}): {session.last_output[:400]}"
+                mem.add(summary, collection="sessions", source="session",
+                        metadata={"session_id": session.id, "tool": session.tool})
+            except Exception as e:
+                log.debug(f"Memory auto-ingest skipped: {e}")
 
     def persist_all(self) -> None:
         with self._lock:

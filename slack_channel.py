@@ -151,7 +151,7 @@ class SlackChannel:
 
 _SLASH_COMMANDS = {
     "end", "status", "cancel", "help", "history", "sessions", "dirs",
-    "switch", "queue", "remind", "tool", "eta", "watch", "schedule",
+    "switch", "queue", "remind", "tool", "eta", "watch", "schedule", "memory",
 }
 
 

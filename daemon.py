@@ -399,6 +399,10 @@ class Daemon:
             arg = cmd[9:].strip()
             self._cmd_schedule(arg)
             return
+        if cmd_lower.startswith("/memory"):
+            arg = cmd[7:].strip()
+            self._cmd_memory(arg)
+            return
 
         # Regular message — parse prefix
         parsed = parse_prefix(text)
@@ -1199,6 +1203,65 @@ class Daemon:
 
     # --- /schedule ---
 
+    def _cmd_memory(self, args: str) -> None:
+        """Search and manage shared memory."""
+        if not args or args == "help":
+            self._reply(
+                "/memory search <query> - search all collections\n"
+                "/memory search <query> in <collection> - search specific\n"
+                "/memory add <collection> <text> - add to memory\n"
+                "/memory collections - list collections\n"
+                "/memory stats - show stats"
+            )
+            return
+
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+
+        if args == "collections":
+            collections = mem.list_collections()
+            if not collections:
+                self._reply("No collections. Add entries via /memory add <collection> <text>")
+                return
+            lines = ["Collections:"]
+            for c in collections:
+                lines.append(f"  {c['name']} ({c['entry_count']} entries)")
+            self._reply("\n".join(lines))
+            return
+
+        if args == "stats":
+            s = mem.stats()
+            self._reply(f"Total: {s['total_entries']} entries. Collections: {', '.join(f'{k}({v})' for k,v in s['collections'].items())}")
+            return
+
+        if args.startswith("add "):
+            parts = args[4:].split(None, 1)
+            if len(parts) < 2:
+                self._reply("Usage: /memory add <collection> <text>")
+                return
+            collection, text = parts[0], parts[1]
+            mid = mem.add(text, collection, source="manual")
+            self._reply(f"Added to {collection} (id: {mid})")
+            return
+
+        if args.startswith("search "):
+            query = args[7:]
+            collections = None
+            if " in " in query:
+                query, coll = query.rsplit(" in ", 1)
+                collections = [coll.strip()]
+            results = mem.search(query.strip(), collections=collections, limit=5)
+            if not results:
+                self._reply("No results found.")
+                return
+            lines = [f"Memory search: '{query.strip()}'"]
+            for r in results:
+                lines.append(f"  {r['score']:.2f} [{r['collection']}] {r['text'][:80]}")
+            self._reply("\n".join(lines))
+            return
+
+        self._reply("Unknown /memory command. Try /memory help")
+
     def _cmd_schedule(self, args: str) -> None:
         """Manage scheduled tasks."""
         if not args or args == "help":
@@ -1737,6 +1800,9 @@ class Daemon:
                 return
             if cmd_lower.startswith("/schedule"):
                 self._cmd_schedule(text[9:].strip())
+                return
+            if cmd_lower.startswith("/memory"):
+                self._cmd_memory(text[7:].strip())
                 return
 
             parsed = parse_prefix(text)

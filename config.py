@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "cli_tool": "claude",
     "parsing_tool": "claude",
     "auto_memory_inject": True,
+    "personas": [],
     "adapters": {
         "claude": {"effort": "max"},
         "wasabi": {"account": "YOUR_ACCOUNT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},

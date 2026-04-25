@@ -244,6 +244,7 @@ class WorkflowEngine:
             wf_run.completed_at = time.time()
             self._persist()
             self._bus.publish("workflow.run.completed", wf_run.to_dict())
+            self._auto_ingest_to_memory(wf_run)
 
     def _walk(self, wf_run, nodes, children, parents, node_id, session_id):
         if self._abort_flags.get(wf_run.id):
@@ -354,6 +355,9 @@ class WorkflowEngine:
             seconds = data.get("seconds", 0)
             time.sleep(seconds)
             ns.output = f"Waited {seconds}s"
+
+        elif node_type == "memory-search":
+            self._execute_memory_search(wf_run, node, ns, session_id)
 
         elif node_type == "notify":
             self._execute_notify(wf_run, node, ns)
@@ -494,6 +498,39 @@ class WorkflowEngine:
             raise Exception(result.get("error", "Prompt execution failed"))
         else:
             raise Exception("Timeout waiting for prompt execution")
+
+    def _execute_memory_search(self, wf_run, node, ns, session_id):
+        from variable_resolver import substitute_variables
+        from shared_memory import get_shared_memory
+        data = node.get("data", {})
+        query = substitute_variables(data.get("query", ""), wf_run.params)
+        if not query:
+            ns.output = "(empty query)"
+            return
+        collections = data.get("collections") or None
+        limit = data.get("limit", 5)
+        mem = get_shared_memory()
+        results = mem.search(query, collections=collections, limit=limit)
+        if results:
+            context = f"Memory search results for '{query}':\n"
+            for r in results:
+                context += f"- [{r['collection']}] (score: {r['score']:.2f}) {r['text'][:200]}\n"
+            ns.output = context
+            self._run_prompt(session_id, f"Use this context for the next steps:\n{context}")
+        else:
+            ns.output = "No relevant memories found."
+
+    def _auto_ingest_to_memory(self, wf_run) -> None:
+        try:
+            from shared_memory import get_shared_memory
+            mem = get_shared_memory()
+            for node_id, ns in wf_run.node_states.items():
+                if ns.output and len(ns.output) > 50 and ns.status == "completed":
+                    text = f"Workflow '{wf_run.workflow_name}' node {node_id}: {ns.output[:400]}"
+                    mem.add(text, collection="workflows", source="workflow",
+                            metadata={"workflow_id": wf_run.workflow_id, "node": node_id, "run_id": wf_run.id})
+        except Exception as e:
+            log.debug(f"Workflow memory ingest skipped: {e}")
 
     def _save_artifact(self, run_id: str, filename: str, content: str) -> None:
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts", run_id)

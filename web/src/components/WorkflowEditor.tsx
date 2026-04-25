@@ -107,7 +107,7 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
       id,
       type,
       position: { x: 250 + Math.random() * 100, y: 150 + nodes.length * 80 },
-      data: type === "prompt" ? { prompt: "" } : type === "branch" ? { branch_type: "conditional", condition: "" } : type === "delay" ? { seconds: 60 } : type === "approval" ? { message: "Approval required" } : type === "notify" ? { channel: "imessage", message: "", wait_for_ack: false } : {},
+      data: type === "prompt" ? { prompt: "" } : type === "branch" ? { branch_type: "conditional", condition: "" } : type === "delay" ? { seconds: 60 } : type === "approval" ? { message: "Approval required" } : type === "notify" ? { channel: "imessage", message: "", wait_for_ack: false } : type === "memory-search" ? { query: "", collections: [], limit: 5 } : {},
     };
     setNodes((nds) => [...nds, newNode]);
   };
@@ -386,6 +386,39 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
                       className="rounded border-border"
                     />
                     <label htmlFor="wait-ack" className="text-xs text-muted-foreground">Wait for acknowledgment</label>
+                  </div>
+                </>
+              )}
+              {selectedNode.type === "memory-search" && (
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Search query</label>
+                    <Textarea
+                      value={(selectedNode.data as any)?.query || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { query: e.target.value })}
+                      placeholder="What to search for in memory..."
+                      rows={3}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Collections (comma-separated, empty = all)</label>
+                    <Input
+                      value={(selectedNode.data as any)?.collections?.join(", ") || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { collections: e.target.value.split(",").map((s: string) => s.trim()).filter(Boolean) })}
+                      placeholder="nexus-docs, sessions"
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-muted-foreground">Result limit</label>
+                    <Input
+                      type="number"
+                      value={(selectedNode.data as any)?.limit || 5}
+                      onChange={(e) => updateNodeData(selectedNode.id, { limit: parseInt(e.target.value) || 5 })}
+                      className="h-7 text-xs w-20"
+                      min={1}
+                      max={20}
+                    />
                   </div>
                 </>
               )}

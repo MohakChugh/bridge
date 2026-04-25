@@ -525,6 +525,34 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=400, detail="Path not found")
         return {"imported": count}
 
+    # ---- Personas ----
+
+    @app.get("/api/personas")
+    def list_personas():
+        return {"personas": daemon_ref.config.get("personas", [])}
+
+    @app.post("/api/personas")
+    def create_persona(body: dict):
+        from config import save_config
+        personas = daemon_ref.config.setdefault("personas", [])
+        persona = {
+            "name": body.get("name", "New Persona"),
+            "system_prompt": body.get("system_prompt", ""),
+            "collections": body.get("collections", []),
+            "tool": body.get("tool", daemon_ref.config.get("cli_tool", "wasabi")),
+        }
+        personas.append(persona)
+        save_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"), daemon_ref.config)
+        return persona
+
+    @app.delete("/api/personas/{name}")
+    def delete_persona(name: str):
+        from config import save_config
+        personas = daemon_ref.config.get("personas", [])
+        daemon_ref.config["personas"] = [p for p in personas if p.get("name") != name]
+        save_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"), daemon_ref.config)
+        return {"deleted": True}
+
     @app.post("/api/variables/resolve")
     def resolve_variables_endpoint(body: dict):
         from variable_resolver import resolve_variables
