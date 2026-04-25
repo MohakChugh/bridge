@@ -19,7 +19,7 @@ import { api, type Workflow } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
 import { nodeTypes, NODE_MENU } from "./workflow-nodes";
 import { Button, Input, Textarea } from "./ui";
-import { Save, Play, Plus, ArrowLeft, Settings, X, Sparkles, LayoutGrid, MessageCircle } from "lucide-react";
+import { Save, Play, Plus, ArrowLeft, Settings, X, Sparkles, LayoutGrid, MessageCircle, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { layoutDagre } from "@/lib/dagre-layout";
 import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
@@ -206,6 +206,26 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
           <Save className="w-3.5 h-3.5" />
           {saveMut.isPending ? "Saving..." : "Save"}
         </Button>
+        {activeWorkflowId && (
+          <Button size="sm" variant="outline" onClick={async () => {
+            const payload = {
+              name: `Copy of ${wfName}`,
+              tool: wfTool,
+              cwd: wfCwd,
+              require_approval: nodes.some((n) => n.type === "approval"),
+              nodes: nodes.map((n) => ({ id: n.id, type: n.type, position: n.position, data: n.data })),
+              edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target, label: e.label })),
+              schedule: null,
+            };
+            const saved = await api.workflows.create(payload);
+            qc.invalidateQueries({ queryKey: ["workflows"] });
+            setActiveWorkflowId(saved.id);
+            setView("workflow-editor");
+          }}>
+            <Copy className="w-3.5 h-3.5" />
+            Copy to New
+          </Button>
+        )}
         <Button size="sm" onClick={() => runMut.mutate()} disabled={runMut.isPending}>
           <Play className="w-3.5 h-3.5" />
           {runMut.isPending ? "Starting..." : "Run"}
