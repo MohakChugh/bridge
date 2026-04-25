@@ -385,7 +385,7 @@ class WorkflowEngine:
             "run_id": wf_run.id,
             "node_id": node["id"],
             "channel": channel,
-            "message": message,
+            "message": composed,
             "sent_to": sent_to,
         })
 
