@@ -953,3 +953,137 @@ class TestPersonasAPI:
         assert r.json()["name"] == "test_persona"
         # Cleanup
         client.delete("/api/personas/test_persona")
+
+
+# ---- 19. Knowledge Base API Tests ----
+
+class TestKnowledgeBaseAPI:
+    def test_list_documents(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/knowledge/documents")
+        assert r.status_code == 200
+        assert "documents" in r.json()
+
+    def test_register_document(self, app_client):
+        client, _, _ = app_client
+        r = client.post("/api/knowledge/documents", json={
+            "name": "test_kb_doc",
+            "source_type": "file",
+            "source_url": "/tmp",
+            "collection": "test_kb",
+            "tags": ["test"],
+        })
+        assert r.status_code == 200
+        assert r.json()["name"] == "test_kb_doc"
+        doc_id = r.json()["id"]
+        client.delete(f"/api/knowledge/documents/{doc_id}")
+
+    def test_delete_document(self, app_client):
+        client, _, _ = app_client
+        cr = client.post("/api/knowledge/documents", json={
+            "name": "test_del_doc",
+            "source_type": "file",
+            "source_url": "/tmp",
+            "collection": "test_del",
+        })
+        doc_id = cr.json()["id"]
+        r = client.delete(f"/api/knowledge/documents/{doc_id}")
+        assert r.status_code == 200
+
+    def test_list_tags(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/knowledge/tags")
+        assert r.status_code == 200
+        assert "tags" in r.json()
+
+    def test_get_graph(self, app_client):
+        client, _, _ = app_client
+        r = client.get("/api/knowledge/graph")
+        assert r.status_code == 200
+        assert "nodes" in r.json()
+        assert "edges" in r.json()
+
+    def test_create_and_delete_edge(self, app_client):
+        client, _, _ = app_client
+        # Create two memory entries first
+        client.post("/api/memory/collections", json={"name": "test_edge_coll"})
+        r1 = client.post("/api/memory/add", json={"text": "test source entry", "collection": "test_edge_coll"})
+        r2 = client.post("/api/memory/add", json={"text": "test target entry", "collection": "test_edge_coll"})
+        sid = r1.json()["id"]
+        tid = r2.json()["id"]
+        # Create edge
+        er = client.post("/api/knowledge/graph/edges", json={"source_id": sid, "target_id": tid, "relation": "related"})
+        assert er.status_code == 200
+        eid = er.json()["id"]
+        # Delete edge
+        dr = client.delete(f"/api/knowledge/graph/edges/{eid}")
+        assert dr.status_code == 200
+        # Cleanup
+        client.delete("/api/memory/collections/test_edge_coll")
+
+    def test_search_with_tags_filter(self, app_client):
+        client, _, _ = app_client
+        r = client.post("/api/memory/search", json={"query": "test", "tags": ["nonexistent"]})
+        assert r.status_code == 200
+
+
+# ---- 20. Knowledge Ingestion Unit Tests ----
+
+class TestKnowledgeIngestion:
+    def test_chunk_text(self):
+        from knowledge_ingestion import _chunk_text
+        text = "Paragraph one about services.\n\nParagraph two about APIs.\n\nParagraph three about databases."
+        chunks = _chunk_text(text, chunk_size=100)
+        assert len(chunks) >= 1
+        assert all("text" in c for c in chunks)
+
+    def test_extract_python_functions(self):
+        from knowledge_ingestion import _extract_python_functions
+        code = '''
+def hello(name):
+    """Say hello."""
+    return f"Hello {name}"
+
+class MyClass:
+    def method(self):
+        pass
+'''
+        funcs = _extract_python_functions(code, "test.py")
+        assert len(funcs) >= 1
+        assert any("hello" in f["text"] for f in funcs)
+
+    def test_extract_java_functions(self):
+        from knowledge_ingestion import _extract_java_functions
+        code = '''
+public class Handler {
+    public String handleRequest(String input) {
+        return "hello";
+    }
+    private void helper() {
+    }
+}
+'''
+        funcs = _extract_java_functions(code, "Handler.java")
+        assert len(funcs) >= 1
+
+    def test_extract_ts_functions(self):
+        from knowledge_ingestion import _extract_ts_functions
+        code = '''
+export function fetchData(url: string) {
+  return fetch(url);
+}
+const helper = async (id: number) => {
+  return await db.get(id);
+}
+'''
+        funcs = _extract_ts_functions(code, "api.ts")
+        assert len(funcs) >= 1
+
+    def test_chunk_directory(self):
+        from knowledge_ingestion import _chunk_directory
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "test.md"), "w") as f:
+                f.write("# Test\n\nThis is test content about pipelines and deployments.")
+            chunks = _chunk_directory(tmpdir)
+            assert len(chunks) >= 1

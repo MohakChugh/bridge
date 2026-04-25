@@ -478,9 +478,27 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         if not query:
             raise HTTPException(status_code=400, detail="query required")
         collections = body.get("collections")
-        limit = body.get("limit", 5)
-        results = get_shared_memory().search(query, collections=collections, limit=limit)
-        return {"results": results, "query": query}
+        limit = body.get("limit", 10)
+        tags_filter = body.get("tags")
+        results = get_shared_memory().search(query, collections=collections, limit=limit * 3)
+        # Post-filter by tags if specified
+        if tags_filter and isinstance(tags_filter, list):
+            filtered = []
+            for r in results:
+                entry_tags = []
+                try:
+                    entry_tags = json.loads(r.get("metadata", "{}")).get("tags", [])
+                except Exception:
+                    pass
+                if not entry_tags:
+                    try:
+                        entry_tags = json.loads(r.get("tags", "[]"))
+                    except Exception:
+                        pass
+                if any(t in entry_tags for t in tags_filter):
+                    filtered.append(r)
+            results = filtered
+        return {"results": results[:limit], "query": query}
 
     @app.post("/api/memory/add")
     def add_to_memory(body: dict):
@@ -545,7 +563,17 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         if not name or not source_url:
             raise HTTPException(status_code=400, detail="name and source_url required")
         doc_id = mem.register_document(name, source_type, source_url, collection, tags, persona)
-        return {"id": doc_id, "name": name, "status": "registered"}
+        # Trigger async ingestion
+        import threading
+        def _ingest():
+            try:
+                from knowledge_ingestion import ingest_document
+                result = ingest_document(doc_id, daemon_ref.config)
+                log.info(f"Ingested document {name}: {result}")
+            except Exception as e:
+                log.warning(f"Ingestion failed for {name}: {e}")
+        threading.Thread(target=_ingest, daemon=True).start()
+        return {"id": doc_id, "name": name, "status": "ingesting"}
 
     @app.delete("/api/knowledge/documents/{doc_id}")
     def delete_kb_document(doc_id: str):
@@ -560,42 +588,32 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         doc = mem.get_document(doc_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        mem.refresh_document(doc_id)
-        # Re-ingest based on source type
-        source_type = doc["source_type"]
-        source_url = doc["source_url"]
-        collection = doc["collection"]
-        if source_type in ("file", "code"):
-            if os.path.isdir(source_url):
-                count = mem.import_directory(source_url, collection)
-            elif os.path.isfile(source_url):
-                count = mem.import_file(source_url, collection)
-            else:
-                count = 0
-            mem.update_document_chunks(doc_id, count)
-            return {"refreshed": True, "chunks": count}
-        return {"refreshed": True, "chunks": 0, "note": "URL refresh requires ingestion pipeline"}
+        import threading
+        def _refresh():
+            try:
+                from knowledge_ingestion import ingest_document
+                result = ingest_document(doc_id, daemon_ref.config)
+                log.info(f"Refreshed {doc['name']}: {result}")
+            except Exception as e:
+                log.warning(f"Refresh failed: {e}")
+        threading.Thread(target=_refresh, daemon=True).start()
+        return {"refreshed": True, "status": "refreshing"}
 
     @app.post("/api/knowledge/refresh-all")
     def refresh_all_kb():
         from shared_memory import get_shared_memory
         mem = get_shared_memory()
-        results = []
-        for doc in mem.list_documents():
-            doc_id = doc["id"]
-            mem.refresh_document(doc_id)
-            source_type = doc["source_type"]
-            source_url = doc["source_url"]
-            collection = doc["collection"]
-            count = 0
-            if source_type in ("file", "code") and os.path.exists(source_url):
-                if os.path.isdir(source_url):
-                    count = mem.import_directory(source_url, collection)
-                else:
-                    count = mem.import_file(source_url, collection)
-            mem.update_document_chunks(doc_id, count)
-            results.append({"id": doc_id, "name": doc["name"], "chunks": count})
-        return {"refreshed": len(results), "documents": results}
+        docs = mem.list_documents()
+        import threading
+        def _refresh_all():
+            from knowledge_ingestion import ingest_document
+            for doc in docs:
+                try:
+                    ingest_document(doc["id"], daemon_ref.config)
+                except Exception as e:
+                    log.warning(f"Refresh failed for {doc['name']}: {e}")
+        threading.Thread(target=_refresh_all, daemon=True).start()
+        return {"refreshing": len(docs), "status": "started"}
 
     @app.get("/api/knowledge/tags")
     def list_kb_tags():
