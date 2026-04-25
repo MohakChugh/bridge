@@ -292,27 +292,14 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
               {selectedNode.type === "branch" && (
                 <>
                   <div>
-                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Branch type</label>
-                    <select
-                      value={(selectedNode.data as any)?.branch_type || "conditional"}
-                      onChange={(e) => updateNodeData(selectedNode.id, { branch_type: e.target.value })}
-                      className="w-full h-9 rounded-md border border-border bg-transparent px-3 text-sm"
-                    >
-                      <option value="conditional">Conditional (LLM decides)</option>
-                      <option value="parallel">Parallel (all paths)</option>
-                    </select>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Condition (LLM evaluates yes/no)</label>
+                    <Textarea
+                      value={(selectedNode.data as any)?.condition || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { condition: e.target.value })}
+                      placeholder="e.g. any pipelines failing?"
+                      rows={3}
+                    />
                   </div>
-                  {(selectedNode.data as any)?.branch_type !== "parallel" && (
-                    <div>
-                      <label className="text-xs font-medium text-muted-foreground block mb-1.5">Condition</label>
-                      <Textarea
-                        value={(selectedNode.data as any)?.condition || ""}
-                        onChange={(e) => updateNodeData(selectedNode.id, { condition: e.target.value })}
-                        placeholder="e.g. any pipelines failing?"
-                        rows={3}
-                      />
-                    </div>
-                  )}
                 </>
               )}
               {selectedNode.type === "delay" && (

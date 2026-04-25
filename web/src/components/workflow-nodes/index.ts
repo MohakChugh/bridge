@@ -23,7 +23,6 @@ export const NODE_MENU = [
   { type: "prompt", label: "Prompt", color: "bg-primary/20 text-primary" },
   { type: "notify", label: "Notify", color: "bg-primary/20 text-primary" },
   { type: "branch", label: "Branch", color: "bg-warning/20 text-warning" },
-  { type: "merge", label: "Merge", color: "bg-warning/20 text-warning" },
   { type: "delay", label: "Delay", color: "bg-muted text-muted-foreground" },
   { type: "approval", label: "Approval", color: "bg-destructive/20 text-destructive" },
   { type: "end", label: "End", color: "bg-destructive/20 text-destructive" },
