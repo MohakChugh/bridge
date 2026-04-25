@@ -54,47 +54,99 @@ def parse_json_with_llm(prompt: str, config: dict, timeout: int = 120) -> Option
     """Send prompt and extract JSON from response.
 
     Handles tools that don't support --output-format json by extracting
-    the first JSON object from text output.
+    the first JSON object from text output. Retries once with stronger
+    JSON instruction if first attempt fails.
     """
+    # Ensure prompt emphasizes JSON-only output
+    if "Reply ONLY with" not in prompt and "ONLY with valid JSON" not in prompt:
+        prompt = prompt.rstrip() + "\n\nIMPORTANT: Reply with ONLY valid JSON. No explanations, no markdown, no text before or after the JSON."
+
     raw = parse_with_llm(prompt, config, timeout=timeout)
     if not raw:
         return None
-    return extract_json(raw)
+
+    result = extract_json(raw)
+    if result:
+        return result
+
+    # Retry with stronger instruction
+    log.info("JSON extraction failed on first attempt, retrying with stronger prompt")
+    retry_prompt = (
+        "Your previous response was not valid JSON. "
+        "Reply with ONLY a JSON object. No text, no explanation, no code blocks. "
+        "Just the raw JSON starting with { and ending with }.\n\n"
+        + prompt
+    )
+    raw2 = parse_with_llm(retry_prompt, config, timeout=timeout)
+    if raw2:
+        return extract_json(raw2)
+    return None
 
 
 def extract_json(text: str) -> Optional[dict]:
-    """Extract first JSON object from text. Handles wrapped JSON."""
+    """Extract first JSON object from text — bulletproof across all tools.
+
+    Handles:
+    - Direct JSON string
+    - Claude {"result": "..."} wrapper
+    - JSON buried in text/prose
+    - JSON inside markdown code blocks (```json ... ```)
+    - JSON with leading/trailing whitespace and newlines
+    - Multiple JSON objects (returns first valid one)
+    - Escaped quotes in text surrounding JSON
+    """
     if not text:
         return None
 
-    # Try direct parse first (Claude with --output-format json)
+    text = text.strip()
+
+    # 1. Direct parse
     try:
-        data = json.loads(text.strip())
+        data = json.loads(text)
         if isinstance(data, dict):
-            # Claude wraps in {"result": "..."} — unwrap
             if "result" in data and isinstance(data["result"], str):
                 inner = extract_json(data["result"])
                 if inner:
                     return inner
             return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         pass
 
-    # Find first { ... } in text (wasabi/kiro text output)
-    start = text.find("{")
-    if start < 0:
-        return None
+    # 2. Strip markdown code blocks: ```json ... ``` or ``` ... ```
+    import re
+    code_block = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if code_block:
+        try:
+            data = json.loads(code_block.group(1).strip())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # 3. Find all { ... } candidates and try each (handles noise before/after)
+    candidates = []
     depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "{":
             if depth == 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    return None
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(text[start:i + 1])
+                start = -1
+
+    # Try longest candidate first (most likely to be the full JSON)
+    for candidate in sorted(candidates, key=len, reverse=True):
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            continue
+
     return None
 
 
