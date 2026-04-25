@@ -26,7 +26,7 @@ Chat with Claude Code, Wasabi, and Kiro CLI from your **phone, Slack, or a beaut
 
 ## What is this?
 
-A multi-channel daemon that lets you drive Amazon's internal AI CLIs from any device:
+A multi-channel daemon that lets you drive AI CLIs from any device:
 
 - **Web dashboard** (localhost:7777) — React + TailwindCSS admin panel with chat, workflows, automation
 - **iMessage** — self-chat from your iPhone, Apple Watch, or any Apple device
