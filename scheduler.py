@@ -87,11 +87,12 @@ def next_cron_fire(cron: str, after: Optional[datetime] = None) -> float:
     return time.time() + 86400
 
 
-def parse_schedule_via_llm(natural_text: str, env: dict) -> Optional[dict]:
-    """Use Claude Code (cheap) to parse natural language into cron.
+def parse_schedule_via_llm(natural_text: str, env: dict, config: Optional[dict] = None) -> Optional[dict]:
+    """Parse natural language into cron using configured parsing tool.
 
     Returns: {"cron": "0 9 * * *", "human": "daily at 9:00 AM"} or None
     """
+    from llm_parser import parse_json_with_llm
     prompt = (
         f"Parse this schedule into cron format. "
         f"Input: {natural_text}. "
@@ -100,22 +101,10 @@ def parse_schedule_via_llm(natural_text: str, env: dict) -> Optional[dict]:
         f"Use 5-field cron. Day of week: 0=Sun, 6=Sat."
     )
     try:
-        result = subprocess.run(
-            ["zsh", "-i", "-c",
-             f"claude -p {shlex.quote(prompt)} "
-             f"--output-format json --dangerously-skip-permissions --effort low"],
-            capture_output=True, text=True, timeout=120, env=env,
-        )
-        if result.returncode == 0:
-            outer = json.loads(result.stdout)
-            text = outer.get("result", "")
-            # Extract JSON from response (may have surrounding text)
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = json.loads(text[start:end])
-                if "cron" in parsed and "human" in parsed:
-                    return parsed
+        cfg = config or {}
+        parsed = parse_json_with_llm(prompt, cfg, timeout=120)
+        if parsed and "cron" in parsed and "human" in parsed:
+            return parsed
     except Exception as e:
         log.warning(f"Schedule LLM parse failed: {e}")
     return None

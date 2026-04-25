@@ -76,7 +76,7 @@ class ParseBody(BaseModel):
 class WorkflowBody(BaseModel):
     name: str
     description: str = ""
-    tool: str = "wasabi"
+    tool: str = ""
     cwd: str = "/tmp"
     require_approval: bool = False
     nodes: list = []
@@ -107,13 +107,51 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
 
     @app.get("/api/config")
     def get_config():
+        from adapters import list_adapters
         cfg = daemon_ref.config
         return {
             "directories": cfg.get("directories", {}),
-            "tools": ["claude", "wasabi", "kiro"],
+            "tools": list_adapters(),
             "active_tool": cfg.get("cli_tool", "claude"),
+            "parsing_tool": cfg.get("parsing_tool", "claude"),
             "max_parallel_sessions": cfg.get("max_parallel_sessions", 4),
         }
+
+    @app.get("/api/settings")
+    def get_settings():
+        from adapters import list_adapters, get_adapter
+        cfg = daemon_ref.config
+        tools_status = []
+        for name in list_adapters():
+            try:
+                adapter = get_adapter(name)
+                tools_status.append({"name": name, "available": adapter.is_available()})
+            except Exception:
+                tools_status.append({"name": name, "available": False})
+        return {
+            "cli_tool": cfg.get("cli_tool", "claude"),
+            "parsing_tool": cfg.get("parsing_tool", "claude"),
+            "max_parallel_sessions": cfg.get("max_parallel_sessions", 4),
+            "gateway_port": cfg.get("gateway", {}).get("port", 7777),
+            "slack_enabled": cfg.get("slack", {}).get("enabled", False),
+            "imessage_enabled": getattr(daemon_ref, '_imessage_enabled', False),
+            "tools": tools_status,
+            "directories": cfg.get("directories", {}),
+        }
+
+    @app.post("/api/settings")
+    def update_settings(body: dict):
+        from config import save_config
+        cfg = daemon_ref.config
+        changed = []
+        for key in ["cli_tool", "parsing_tool", "max_parallel_sessions"]:
+            if key in body and body[key] != cfg.get(key):
+                cfg[key] = body[key]
+                changed.append(key)
+        if changed:
+            save_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"), cfg)
+            get_event_bus().publish("settings.changed", {"changed": changed})
+        return {"saved": True, "changed": changed}
 
     @app.get("/api/tools")
     def list_tools():
@@ -242,7 +280,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         from scheduler import parse_schedule_via_llm
         from adapters.base import get_login_shell_env
         env = get_login_shell_env()
-        parsed = parse_schedule_via_llm(body.text, env)
+        parsed = parse_schedule_via_llm(body.text, env, config=daemon_ref.config)
         if not parsed:
             raise HTTPException(status_code=400, detail="Could not parse schedule")
         return parsed
@@ -422,7 +460,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         cwd = body.get("cwd", daemon_ref.config["directories"].get("default", "/tmp"))
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
-        wf = generate_workflow(text, tool=tool, cwd=cwd)
+        wf = generate_workflow(text, tool=tool, cwd=cwd, config=daemon_ref.config)
         if not wf:
             raise HTTPException(status_code=500, detail="Failed to generate workflow")
         return wf
@@ -438,7 +476,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=400, detail="feedback is required")
         node_id = body.get("node_id")
         scope = body.get("scope", "node_and_downstream")
-        refined = refine_workflow(wf, feedback, node_id=node_id, scope=scope)
+        refined = refine_workflow(wf, feedback, node_id=node_id, scope=scope, config=daemon_ref.config)
         if not refined:
             raise HTTPException(status_code=500, detail="Failed to refine workflow")
         refined["id"] = wf_id
@@ -565,7 +603,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         human = body.get("human")
         if not cron and text:
             env = get_login_shell_env()
-            parsed = parse_schedule_via_llm(text, env)
+            parsed = parse_schedule_via_llm(text, env, config=daemon_ref.config)
             if not parsed:
                 raise HTTPException(status_code=400, detail="Could not parse schedule")
             cron = parsed.get("cron")

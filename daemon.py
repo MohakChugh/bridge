@@ -822,8 +822,9 @@ class Daemon:
         threading.Thread(target=_parse, daemon=True).start()
 
     def _parse_remind_via_llm(self, natural_text: str, env: dict) -> Optional[dict]:
-        """Use Claude to parse natural language reminder into timestamp."""
+        """Parse natural language reminder into timestamp using configured tool."""
         from datetime import datetime
+        from llm_parser import parse_json_with_llm
         now = datetime.now()
         prompt = (
             f"Parse this reminder into a specific date and time in LOCAL time. "
@@ -834,24 +835,11 @@ class Daemon:
             f"Separate the TIME part from the MESSAGE part."
         )
         try:
-            result = subprocess.run(
-                ["zsh", "-i", "-c",
-                 f"claude -p {shlex.quote(prompt)} "
-                 f"--output-format json --dangerously-skip-permissions --effort low"],
-                capture_output=True, text=True, timeout=120, env=env,
-            )
-            if result.returncode == 0:
-                import json as _json
-                outer = _json.loads(result.stdout)
-                text = outer.get("result", "")
-                start = text.find("{")
-                end = text.rfind("}") + 1
-                if start >= 0 and end > start:
-                    parsed = _json.loads(text[start:end])
-                    if "iso" in parsed and "message" in parsed:
-                        dt = datetime.fromisoformat(parsed["iso"])
-                        parsed["fire_at"] = dt.timestamp()
-                        return parsed
+            parsed = parse_json_with_llm(prompt, self.config, timeout=120)
+            if parsed and "iso" in parsed and "message" in parsed:
+                dt = datetime.fromisoformat(parsed["iso"])
+                parsed["fire_at"] = dt.timestamp()
+                return parsed
         except Exception as e:
             log.warning(f"Remind LLM parse failed: {e}")
         return None
@@ -1639,30 +1627,21 @@ class Daemon:
                 log.warning(f"Stuck check failed: {e}")
 
     def _get_stuck_diagnosis(self, diag: dict) -> str:
-        """Ask Claude to self-diagnose why it's stuck. Returns diagnosis text."""
-        if not self.active_session_id or self.config.get("cli_tool") != "claude":
+        """Ask configured tool to self-diagnose why it's stuck. Returns diagnosis text."""
+        if not self.active_session_id:
             return ""
         try:
+            from llm_parser import parse_with_llm
             child_cmds = ", ".join(diag.get("child_commands", [])[:2])
             elapsed_min = int(diag["elapsed"] // 60)
-            from adapters.base import get_login_shell_env
-            env = get_login_shell_env()
-            result = subprocess.run(
-                ["zsh", "-i", "-c",
-                 f'claude -p "You have been running for {elapsed_min} minutes. '
-                 f'Your child process ({child_cmds}) has been unchanged for '
-                 f'{int(diag["stale_minutes"])} minutes. Why are you stuck? '
-                 f'What is blocking? Reply in 2 plain text sentences." '
-                 f'--output-format json --dangerously-skip-permissions --effort low '
-                 f'--resume {self.active_session_id}'],
-                capture_output=True, text=True, timeout=30,
-                cwd=self.active_session_cwd or "/tmp",
-                env=env,
+            prompt = (
+                f"You have been running for {elapsed_min} minutes. "
+                f"Your child process ({child_cmds}) has been unchanged for "
+                f"{int(diag['stale_minutes'])} minutes. Why are you stuck? "
+                f"What is blocking? Reply in 2 plain text sentences."
             )
-            if result.returncode == 0:
-                import json as _json
-                data = _json.loads(result.stdout)
-                return data.get("result", "")[:200]
+            result = parse_with_llm(prompt, self.config, timeout=30)
+            return (result or "")[:200]
         except Exception as e:
             log.debug(f"Self-diagnosis failed: {e}")
         return ""

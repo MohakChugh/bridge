@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { Button, Textarea, Badge } from "./ui";
 import { X, Sparkles, RefreshCw, ArrowRight, MessageSquare, GitBranch, Bell, ShieldCheck, Clock, Play, Square } from "lucide-react";
+import { ToolSelect } from "./ToolSelect";
 
 const NODE_ICONS: Record<string, any> = {
   start: Play,
@@ -88,15 +89,7 @@ export function GenerateWorkflowDialog({ open, onClose, onGenerated, defaultTool
             <div className="flex gap-3 mt-4">
               <div className="flex-1">
                 <label className="text-[10px] font-medium text-muted-foreground block mb-1">Tool</label>
-                <select
-                  value={tool}
-                  onChange={(e) => setTool(e.target.value)}
-                  className="w-full h-8 rounded-md border border-border bg-transparent px-2 text-xs"
-                >
-                  <option value="claude">Claude</option>
-                  <option value="wasabi">Wasabi</option>
-                  <option value="kiro">Kiro</option>
-                </select>
+                <ToolSelect value={tool} onChange={setTool} className="w-full h-8 rounded-md border border-border bg-transparent px-2 text-xs" />
               </div>
               <div className="flex-1">
                 <label className="text-[10px] font-medium text-muted-foreground block mb-1">Directory</label>

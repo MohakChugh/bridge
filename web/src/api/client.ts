@@ -72,6 +72,10 @@ export const api = {
     resume: (id: number) => request<any>(`/watches/${id}/resume`, { method: "POST" }),
   },
   activity: () => request<{ events: any[] }>("/activity"),
+  settings: {
+    get: () => request<any>("/settings"),
+    save: (body: any) => request<any>("/settings", { method: "POST", body: JSON.stringify(body) }),
+  },
 
   workflows: {
     list: () => request<{ workflows: Workflow[] }>("/workflows"),

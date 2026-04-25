@@ -6,6 +6,7 @@ import { ChatView } from "@/components/ChatView";
 import { RemindersList, SchedulesList, WatchesList } from "@/components/SimpleList";
 import { WorkflowList } from "@/components/WorkflowList";
 import { WorkflowAnalytics } from "@/components/WorkflowAnalytics";
+import { SettingsPage } from "@/components/SettingsPage";
 import { WorkflowEditor } from "@/components/WorkflowEditor";
 import { WorkflowRunner } from "@/components/WorkflowRunner";
 import { OperationsDashboard } from "@/components/OperationsDashboard";
@@ -28,6 +29,7 @@ export default function App() {
         {view === "reminders" && <RemindersList />}
         {view === "schedules" && <SchedulesList />}
         {view === "watches" && <WatchesList />}
+        {view === "settings" && <SettingsPage />}
       </main>
     </div>
   );

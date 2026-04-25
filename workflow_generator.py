@@ -35,9 +35,8 @@ Reply with ONLY the complete updated workflow JSON (all nodes + all edges), no o
 {{"name": "...", "nodes": [...], "edges": [...]}}"""
 
 
-def refine_workflow(workflow: dict, feedback: str, node_id: Optional[str] = None, scope: str = "node_and_downstream") -> Optional[dict]:
+def refine_workflow(workflow: dict, feedback: str, node_id: Optional[str] = None, scope: str = "node_and_downstream", config: Optional[dict] = None) -> Optional[dict]:
     """Refine an existing workflow based on user feedback."""
-    env = get_login_shell_env()
 
     node_context = ""
     if node_id:
@@ -60,38 +59,10 @@ def refine_workflow(workflow: dict, feedback: str, node_id: Optional[str] = None
         scope_instruction=scope_instruction,
     )
 
-    cmd = (
-        "claude -p " + shlex.quote(prompt)
-        + " --output-format json --dangerously-skip-permissions --effort high"
-    )
-
+    from llm_parser import parse_json_with_llm
     try:
-        result = subprocess.run(
-            ["zsh", "-i", "-c", cmd],
-            capture_output=True, text=True, timeout=600, env=env,
-        )
-        if result.returncode != 0:
-            log.warning(f"Workflow refine failed: {result.stderr[:200]}")
-            return None
-
-        raw = result.stdout.strip()
-        try:
-            outer = json.loads(raw)
-            if isinstance(outer, dict) and "result" in outer:
-                raw = outer["result"]
-        except json.JSONDecodeError:
-            pass
-
-        if isinstance(raw, str):
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                raw = raw[start:end]
-            wf = json.loads(raw)
-        else:
-            wf = raw
-
-        if not isinstance(wf, dict) or "nodes" not in wf:
+        wf = parse_json_with_llm(prompt, config or {}, timeout=600)
+        if not wf or "nodes" not in wf:
             log.warning("Invalid refined workflow JSON")
             return None
 
@@ -99,12 +70,8 @@ def refine_workflow(workflow: dict, feedback: str, node_id: Optional[str] = None
         wf["name"] = wf.get("name") or workflow.get("name", "Refined Workflow")
         wf["tool"] = workflow.get("tool", "wasabi")
         wf["cwd"] = workflow.get("cwd", "/tmp")
-
         return wf
 
-    except subprocess.TimeoutExpired:
-        log.warning("Workflow refine timed out")
-        return None
     except Exception as e:
         log.warning(f"Workflow refine error: {e}")
         return None
@@ -175,43 +142,14 @@ Reply with ONLY valid JSON, no other text:
 {{"name": "workflow name", "description": "brief description", "nodes": [...], "edges": [...]}}"""
 
 
-def generate_workflow(text: str, tool: str = "wasabi", cwd: str = "/tmp") -> Optional[dict]:
-    env = get_login_shell_env()
+def generate_workflow(text: str, tool: str = "wasabi", cwd: str = "/tmp", config: Optional[dict] = None) -> Optional[dict]:
+    from llm_parser import parse_json_with_llm
     prompt = GENERATE_PROMPT.format(user_text=text, tool=tool)
 
-    cmd = (
-        "claude -p " + shlex.quote(prompt)
-        + " --output-format json --dangerously-skip-permissions --effort high"
-    )
-
     try:
-        result = subprocess.run(
-            ["zsh", "-i", "-c", cmd],
-            capture_output=True, text=True, timeout=600, env=env,
-        )
-        if result.returncode != 0:
-            log.warning(f"Workflow generation failed: {result.stderr[:200]}")
-            return None
-
-        raw = result.stdout.strip()
-        try:
-            outer = json.loads(raw)
-            if isinstance(outer, dict) and "result" in outer:
-                raw = outer["result"]
-        except json.JSONDecodeError:
-            pass
-
-        if isinstance(raw, str):
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                raw = raw[start:end]
-            wf = json.loads(raw)
-        else:
-            wf = raw
-
-        if not isinstance(wf, dict) or "nodes" not in wf or "edges" not in wf:
-            log.warning(f"Invalid workflow JSON structure")
+        wf = parse_json_with_llm(prompt, config or {}, timeout=600)
+        if not wf or "nodes" not in wf or "edges" not in wf:
+            log.warning("Invalid workflow JSON structure")
             return None
 
         wf = _normalize_workflow(wf)
@@ -219,7 +157,6 @@ def generate_workflow(text: str, tool: str = "wasabi", cwd: str = "/tmp") -> Opt
         wf.setdefault("description", text[:200])
         wf["tool"] = tool
         wf["cwd"] = cwd
-
         return wf
 
     except subprocess.TimeoutExpired:

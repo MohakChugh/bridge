@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "stuck_max_alerts": 3,
     "stuck_stale_child_minutes": 10,
     "cli_tool": "claude",
+    "parsing_tool": "claude",
     "adapters": {
         "claude": {"effort": "max"},
         "wasabi": {"account": "YOUR_ACCOUNT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},

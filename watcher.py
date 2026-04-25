@@ -204,21 +204,10 @@ def classify_watch(natural_text: str, config: dict, env: dict) -> Optional[dict]
         f'"human": "readable description"}}'
     )
     try:
-        result = subprocess.run(
-            ["zsh", "-i", "-c",
-             f"claude -p {shlex.quote(prompt)} "
-             f"--output-format json --dangerously-skip-permissions --effort low"],
-            capture_output=True, text=True, timeout=30, env=env,
-        )
-        if result.returncode == 0:
-            outer = json.loads(result.stdout)
-            text = outer.get("result", "")
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = json.loads(text[start:end])
-                if "type" in parsed and "human" in parsed:
-                    return parsed
+        from llm_parser import parse_json_with_llm
+        parsed = parse_json_with_llm(prompt, config, timeout=120)
+        if parsed and "type" in parsed and "human" in parsed:
+            return parsed
     except Exception as e:
         log.warning(f"Watch classify failed: {e}")
     return None

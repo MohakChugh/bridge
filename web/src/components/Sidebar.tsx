@@ -1,6 +1,6 @@
 import { useSessionStore } from "@/stores/sessionStore";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, MessageSquare, Bell, Calendar, Eye, Zap, GitBranch, Activity } from "lucide-react";
+import { LayoutDashboard, MessageSquare, Bell, Calendar, Eye, Zap, GitBranch, Activity, Settings } from "lucide-react";
 
 const items = [
   { view: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
@@ -10,6 +10,7 @@ const items = [
   { view: "reminders" as const, label: "Reminders", icon: Bell },
   { view: "schedules" as const, label: "Schedules", icon: Calendar },
   { view: "watches" as const, label: "Watches", icon: Eye },
+  { view: "settings" as const, label: "Settings", icon: Settings },
 ];
 
 export function Sidebar() {

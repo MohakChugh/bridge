@@ -25,6 +25,7 @@ import { layoutDagre } from "@/lib/dagre-layout";
 import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 import { FeedbackPanel } from "./FeedbackPanel";
 import { VariablesPanel, type WorkflowVariable } from "./VariablesPanel";
+import { ToolSelect } from "./ToolSelect";
 
 export function WorkflowEditor() {
   const { activeWorkflowId } = useSessionStore();
@@ -202,11 +203,7 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
           {"{{x}}"} Vars{variables.length > 0 ? ` (${variables.length})` : ""}
         </button>
         <div className="flex-1" />
-        <select value={wfTool} onChange={(e) => setWfTool(e.target.value)} className="h-8 rounded border border-border bg-transparent px-2 text-xs">
-          <option value="claude">Claude</option>
-          <option value="wasabi">Wasabi</option>
-          <option value="kiro">Kiro</option>
-        </select>
+        <ToolSelect value={wfTool} onChange={setWfTool} />
         <Button size="sm" variant="outline" onClick={() => setGenerateOpen(true)}>
           <Sparkles className="w-3.5 h-3.5" />
           AI
