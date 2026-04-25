@@ -44,6 +44,13 @@ export function useEventStream() {
             const sid = event.data?.session_id;
             if (sid) qc.invalidateQueries({ queryKey: ["session", sid] });
           }
+          if (t.startsWith("workflow.")) {
+            qc.invalidateQueries({ queryKey: ["workflows"] });
+            qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+            if (event.data?.run_id) {
+              qc.invalidateQueries({ queryKey: ["workflow-run", event.data.run_id] });
+            }
+          }
         } catch {}
       };
 

@@ -73,6 +73,21 @@ class ParseBody(BaseModel):
     kind: str  # "remind" | "schedule" | "watch"
 
 
+class WorkflowBody(BaseModel):
+    name: str
+    description: str = ""
+    tool: str = "wasabi"
+    cwd: str = "/tmp"
+    require_approval: bool = False
+    nodes: list = []
+    edges: list = []
+    schedule: Optional[dict] = None
+
+
+class WorkflowApprovalBody(BaseModel):
+    action: str  # "approve" | "abort"
+
+
 def create_app(session_manager, daemon_ref) -> FastAPI:
     app = FastAPI(title="iMessage Bridge Gateway")
 
@@ -367,6 +382,71 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             },
             "timestamp": time.time(),
         }
+
+    # ---- Workflows ----
+
+    from workflow_store import load_workflows, get_workflow as _get_wf, upsert_workflow, delete_workflow as _del_wf, WORKFLOWS_PATH
+    from workflow_engine import WorkflowEngine
+    wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config)
+
+    @app.get("/api/workflows")
+    def list_workflows():
+        return {"workflows": load_workflows(WORKFLOWS_PATH)}
+
+    @app.post("/api/workflows")
+    def create_workflow(body: WorkflowBody):
+        wf = body.model_dump()
+        return upsert_workflow(WORKFLOWS_PATH, wf)
+
+    @app.get("/api/workflows/{wf_id}")
+    def get_workflow_by_id(wf_id: str):
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return wf
+
+    @app.put("/api/workflows/{wf_id}")
+    def update_workflow(wf_id: str, body: WorkflowBody):
+        wf = body.model_dump()
+        wf["id"] = wf_id
+        return upsert_workflow(WORKFLOWS_PATH, wf)
+
+    @app.delete("/api/workflows/{wf_id}")
+    def delete_workflow_by_id(wf_id: str):
+        ok = _del_wf(WORKFLOWS_PATH, wf_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return {"deleted": True}
+
+    @app.post("/api/workflows/{wf_id}/run")
+    def run_workflow(wf_id: str):
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        wf_run = wf_engine.run(wf)
+        return wf_run.to_dict()
+
+    @app.get("/api/workflows/{wf_id}/runs")
+    def list_workflow_runs(wf_id: str):
+        runs = wf_engine.list_runs(wf_id)
+        return {"runs": [r.to_dict() for r in runs]}
+
+    @app.get("/api/workflows/{wf_id}/runs/{run_id}")
+    def get_workflow_run(wf_id: str, run_id: str):
+        wf_run = wf_engine.get_run(run_id)
+        if not wf_run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return wf_run.to_dict()
+
+    @app.post("/api/workflows/{wf_id}/runs/{run_id}/approve")
+    def approve_workflow_run(wf_id: str, run_id: str):
+        ok = wf_engine.approve(run_id)
+        return {"approved": ok}
+
+    @app.post("/api/workflows/{wf_id}/runs/{run_id}/abort")
+    def abort_workflow_run(wf_id: str, run_id: str):
+        ok = wf_engine.abort(run_id)
+        return {"aborted": ok}
 
     # ---- WebSocket ----
 

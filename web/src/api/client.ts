@@ -69,7 +69,59 @@ export const api = {
     resume: (id: number) => request<any>(`/watches/${id}/resume`, { method: "POST" }),
   },
   activity: () => request<{ events: any[] }>("/activity"),
+
+  workflows: {
+    list: () => request<{ workflows: Workflow[] }>("/workflows"),
+    get: (id: string) => request<Workflow>(`/workflows/${id}`),
+    create: (body: any) => request<Workflow>("/workflows", { method: "POST", body: JSON.stringify(body) }),
+    update: (id: string, body: any) => request<Workflow>(`/workflows/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+    delete: (id: string) => request<{ deleted: boolean }>(`/workflows/${id}`, { method: "DELETE" }),
+    run: (id: string) => request<WorkflowRun>(`/workflows/${id}/run`, { method: "POST" }),
+    listRuns: (id: string) => request<{ runs: WorkflowRun[] }>(`/workflows/${id}/runs`),
+    getRun: (wfId: string, runId: string) => request<WorkflowRun>(`/workflows/${wfId}/runs/${runId}`),
+    approve: (wfId: string, runId: string) => request<any>(`/workflows/${wfId}/runs/${runId}/approve`, { method: "POST" }),
+    abort: (wfId: string, runId: string) => request<any>(`/workflows/${wfId}/runs/${runId}/abort`, { method: "POST" }),
+  },
 };
+
+export interface Workflow {
+  id: string;
+  name: string;
+  description: string;
+  tool: string;
+  cwd: string;
+  require_approval: boolean;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  schedule: any | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkflowNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: Record<string, any>;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  workflow_id: string;
+  workflow_name: string;
+  status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
+  node_states: Record<string, { status: string; output: string | null; error: string | null }>;
+  session_id: string | null;
+  started_at: number;
+  completed_at: number | null;
+}
 
 export interface Session {
   id: string;
