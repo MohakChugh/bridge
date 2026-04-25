@@ -108,7 +108,7 @@ class WasabiAdapter(BaseAdapter):
         try:
             cfg = config or {}
             adapter_cfg = cfg.get("adapters", {}).get("wasabi", {})
-            account = adapter_cfg.get("account", "YOUR_ACCT_ID")
+            account = adapter_cfg.get("account", "YOUR_ACCOUNT_ID")
             model = adapter_cfg.get("model", "global.anthropic.claude-opus-4-6-v1:1m")
 
             # Wasabi resets memory between non-interactive calls ("End workflow. Memory Reset").
@@ -179,7 +179,7 @@ class WasabiAdapter(BaseAdapter):
         """Clear wasabi session by running with --disable-continue."""
         cfg = config or {}
         adapter_cfg = cfg.get("adapters", {}).get("wasabi", {})
-        account = adapter_cfg.get("account", "YOUR_ACCT_ID")
+        account = adapter_cfg.get("account", "YOUR_ACCOUNT_ID")
         model = adapter_cfg.get("model", "global.anthropic.claude-opus-4-6-v1:1m")
         try:
             env = get_login_shell_env()

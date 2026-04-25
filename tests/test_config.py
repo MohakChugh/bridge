@@ -14,7 +14,7 @@ def test_load_config_defaults_when_missing():
         path = os.path.join(tmpdir, "config.json")
         cfg = load_config(path)
         assert cfg["poll_interval"] == 1.0
-        assert cfg["directories"]["default"] == "/Volumes/workspace/"
+        assert cfg["directories"]["default"] == "/path/to/workspace"
         assert cfg["cli_tool"] == "claude"
 
 

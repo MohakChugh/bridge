@@ -6,11 +6,8 @@ import os
 DEFAULT_CONFIG = {
     "poll_interval": 1.0,
     "directories": {
-        "default": "/Volumes/workspace/",
-        "centralis": "/Volumes/workspace/Nexus/MyBackendService/src",
-        "frontend": "/Users/chumohak/workspace/Nexus/MyFrontendModule/src",
-        "nexus": "/Volumes/workspace/Nexus/",
-        "home": "/Users/chumohak/",
+        "default": "/path/to/workspace",
+        "home": os.path.expanduser("~/"),
     },
     "self_addresses": [],
     "reply_chat_guid": None,
@@ -27,7 +24,7 @@ DEFAULT_CONFIG = {
     "cli_tool": "claude",
     "adapters": {
         "claude": {"effort": "max"},
-        "wasabi": {"account": "YOUR_ACCT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},
+        "wasabi": {"account": "YOUR_ACCOUNT_ID", "model": "global.anthropic.claude-opus-4-6-v1:1m"},
         "kiro": {"model": "claude-opus-4.7"},
     },
 }

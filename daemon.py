@@ -82,7 +82,7 @@ HELP_TEXT = (
     "  Examples:\n"
     "  /watch all my pipelines\n"
     "  /watch new high sev tickets on MyTeam-Resolver\n"
-    "  /watch pipeline MyBackendService\n"
+    "  /watch pipeline MyServicePipeline\n"
     "/watch list - show all watches with intervals\n"
     "/watch stop <N> - stop watch by number\n"
     "/watch stop all - stop all watches\n"

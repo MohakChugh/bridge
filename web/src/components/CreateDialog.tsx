@@ -223,7 +223,7 @@ export function WatchDialog({ open, onClose }: BaseProps) {
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="new high sev tickets on MyTeam-Resolver&#10;pipeline MyBackendService&#10;all my pipelines"
+            placeholder="new high sev tickets on MyTeam-Resolver&#10;pipeline MyServicePipeline&#10;all my pipelines"
             rows={3}
             autoFocus
           />

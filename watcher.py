@@ -185,10 +185,10 @@ def get_checker(watch_type: str) -> WatchChecker:
 def classify_watch(natural_text: str, config: dict, env: dict) -> Optional[dict]:
     """Use LLM to classify natural language watch command into structured config."""
     groups = ", ".join(config.get("watch_resolver_groups", [
-        "MyTeam-Resolver", "MyTeam-SIS", "MyTeam-Platform", "MyTeam-Tasks"
+        "MyTeam-Resolver",
     ]))
     pipelines = ", ".join(config.get("watch_pipelines", [
-        "MyBackendService", "MyFrontendModule"
+        "MyServicePipeline",
     ]))
 
     prompt = (
