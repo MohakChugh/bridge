@@ -66,7 +66,25 @@ export function SchedulesList() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["schedules"], queryFn: api.schedules.list });
-  const items = data?.schedules ?? [];
+  const { data: wfData } = useQuery({ queryKey: ["workflows"], queryFn: api.workflows.list });
+
+  // Merge prompt schedules + workflow schedules into one list
+  const promptSchedules = (data?.schedules ?? []).map((s: any) => ({ ...s, _type: "prompt" }));
+  const workflowSchedules: any[] = [];
+  for (const wf of (wfData?.workflows ?? [])) {
+    for (const sched of (wf.schedules || [])) {
+      workflowSchedules.push({
+        ...sched,
+        _type: "workflow",
+        _workflow_id: wf.id,
+        _workflow_name: wf.name,
+        prompt: wf.name,
+        tool: wf.tool,
+        params: sched.params,
+      });
+    }
+  }
+  const items = [...promptSchedules, ...workflowSchedules];
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.schedules.delete(id),
@@ -94,16 +112,24 @@ export function SchedulesList() {
       emptyText="No schedules. Click + to create one."
     >
       {items.map((s: any) => (
-        <Card key={s.id} className="hover:border-primary/30 transition-colors">
+        <Card key={`${s._type}-${s.id}`} className="hover:border-primary/30 transition-colors">
           <CardContent className="py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <Badge variant={s.status === "active" ? "success" : "secondary"}>{s.status}</Badge>
                   <span className="text-xs text-muted-foreground font-mono">{s.cron}</span>
+                  {s._type === "workflow" && (
+                    <Badge variant="outline" className="text-[9px]">workflow</Badge>
+                  )}
+                  {s.label && s._type === "workflow" && (
+                    <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[9px] font-medium">{s.label}</span>
+                  )}
                 </div>
-                <div className="text-sm font-medium mt-1.5 truncate">{s.prompt}</div>
-                <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-3">
+                <div className="text-sm font-medium mt-1.5 truncate">
+                  {s._type === "workflow" ? s._workflow_name : s.prompt}
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-3 flex-wrap">
                   <span>{s.human}</span>
                   <span>·</span>
                   <span>{s.tool}</span>
@@ -114,20 +140,43 @@ export function SchedulesList() {
                     </>
                   )}
                 </div>
+                {s.params && Object.keys(s.params).length > 0 && (
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {Object.entries(s.params).map(([k, v]: [string, any]) => (
+                      <span key={k} className="px-1.5 py-0.5 rounded bg-accent text-[9px] text-muted-foreground">
+                        {k}={String(v).length > 20 ? String(v).slice(0, 20) + "…" : String(v)}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="flex gap-1">
-                {s.status === "active" ? (
-                  <Button size="icon" variant="ghost" onClick={() => pauseMut.mutate(s.id)}>
-                    <Pause className="w-3.5 h-3.5" />
-                  </Button>
-                ) : (
-                  <Button size="icon" variant="ghost" onClick={() => resumeMut.mutate(s.id)}>
-                    <Play className="w-3.5 h-3.5" />
+                {s._type === "prompt" && (
+                  <>
+                    {s.status === "active" ? (
+                      <Button size="icon" variant="ghost" onClick={() => pauseMut.mutate(s.id)}>
+                        <Pause className="w-3.5 h-3.5" />
+                      </Button>
+                    ) : (
+                      <Button size="icon" variant="ghost" onClick={() => resumeMut.mutate(s.id)}>
+                        <Play className="w-3.5 h-3.5" />
+                      </Button>
+                    )}
+                    <Button size="icon" variant="ghost" onClick={() => deleteMut.mutate(s.id)}>
+                      <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                    </Button>
+                  </>
+                )}
+                {s._type === "workflow" && (
+                  <Button size="icon" variant="ghost" onClick={() => {
+                    api.workflows.deleteSchedule(s._workflow_id, s.id).then(() => {
+                      qc.invalidateQueries({ queryKey: ["workflows"] });
+                      qc.invalidateQueries({ queryKey: ["schedules"] });
+                    });
+                  }}>
+                    <Trash2 className="w-3.5 h-3.5 text-destructive" />
                   </Button>
                 )}
-                <Button size="icon" variant="ghost" onClick={() => deleteMut.mutate(s.id)}>
-                  <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                </Button>
               </div>
             </div>
           </CardContent>
