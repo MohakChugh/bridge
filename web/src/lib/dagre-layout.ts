@@ -14,10 +14,10 @@ export function layoutDagre(
   g.setDefaultEdgeLabel(() => ({}));
   g.setGraph({
     rankdir: direction,
-    nodesep: 60,
-    ranksep: 80,
-    marginx: 40,
-    marginy: 40,
+    nodesep: 80,
+    ranksep: 120,
+    marginx: 50,
+    marginy: 50,
   });
 
   for (const node of nodes) {

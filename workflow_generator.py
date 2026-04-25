@@ -11,6 +11,44 @@ from adapters.base import get_login_shell_env
 
 log = logging.getLogger("workflow_generator")
 
+
+def _normalize_workflow(wf: dict) -> dict:
+    """Normalize LLM output to match expected schema.
+
+    LLMs often produce variations:
+    - Edges with from/to instead of source/target
+    - Missing edge IDs
+    - Missing node positions
+    - Missing node data fields
+    """
+    # Normalize nodes
+    for i, node in enumerate(wf.get("nodes", [])):
+        if "id" not in node:
+            node["id"] = f"node-{i}"
+        if "position" not in node:
+            node["position"] = {"x": 0, "y": 0}
+        if "data" not in node:
+            node["data"] = {}
+        if "type" not in node:
+            node["type"] = "prompt"
+
+    # Normalize edges — LLM may use from/to, src/dst, source_id/target_id
+    for i, edge in enumerate(wf.get("edges", [])):
+        # Fix source key
+        if "source" not in edge:
+            edge["source"] = edge.pop("from", edge.pop("src", edge.pop("source_id", edge.pop("from_id", ""))))
+        # Fix target key
+        if "target" not in edge:
+            edge["target"] = edge.pop("to", edge.pop("dst", edge.pop("target_id", edge.pop("to_id", ""))))
+        # Ensure ID
+        if "id" not in edge:
+            edge["id"] = f"e-{edge.get('source', i)}-{edge.get('target', i)}"
+
+    # Remove edges with empty source/target
+    wf["edges"] = [e for e in wf["edges"] if e.get("source") and e.get("target")]
+
+    return wf
+
 GENERATE_PROMPT = """You are a workflow DAG designer. Given a natural language description, generate a workflow as JSON.
 
 Available node types:
@@ -78,6 +116,7 @@ def generate_workflow(text: str, tool: str = "wasabi", cwd: str = "/tmp") -> Opt
             log.warning(f"Invalid workflow JSON structure")
             return None
 
+        wf = _normalize_workflow(wf)
         wf.setdefault("name", "AI Generated Workflow")
         wf.setdefault("description", text[:200])
         wf["tool"] = tool
