@@ -12,7 +12,7 @@ interface BaseProps {
 // ---- Reminder Dialog ----
 export function ReminderDialog({ open, onClose }: BaseProps) {
   const [text, setText] = useState("");
-  const [parsed, setParsed] = useState<{ iso: string; human: string; message: string } | null>(null);
+  const [parsed, setParsed] = useState<{ iso: string; human: string; message: string; fire_at?: number } | null>(null);
   const qc = useQueryClient();
 
   const parseMut = useMutation({
@@ -24,7 +24,7 @@ export function ReminderDialog({ open, onClose }: BaseProps) {
     mutationFn: () =>
       api.reminders.create({
         message: parsed!.message,
-        fire_at_epoch: new Date(parsed!.iso).getTime() / 1000,
+        fire_at_epoch: parsed!.fire_at || new Date(parsed!.iso).getTime() / 1000,
         human: parsed!.human,
       }),
     onSuccess: () => {

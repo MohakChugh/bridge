@@ -838,7 +838,7 @@ class Daemon:
                 ["zsh", "-i", "-c",
                  f"claude -p {shlex.quote(prompt)} "
                  f"--output-format json --dangerously-skip-permissions --effort low"],
-                capture_output=True, text=True, timeout=30, env=env,
+                capture_output=True, text=True, timeout=120, env=env,
             )
             if result.returncode == 0:
                 import json as _json
