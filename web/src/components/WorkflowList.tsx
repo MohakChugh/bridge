@@ -123,6 +123,32 @@ export function WorkflowList() {
         open={generateOpen}
         onClose={() => setGenerateOpen(false)}
         onGenerated={async (wf) => {
+          // Ensure all nodes have positions via dagre layout before saving
+          const rfNodes = (wf.nodes || []).map((n: any) => ({
+            id: n.id,
+            type: n.type,
+            position: n.position || { x: 0, y: 0 },
+            data: n.data || {},
+          }));
+          const rfEdges = (wf.edges || []).map((e: any) => ({
+            id: e.id || `e-${e.source}-${e.target}`,
+            source: e.source,
+            target: e.target,
+            label: e.label,
+          }));
+          const laid = layoutDagre(rfNodes, rfEdges);
+          wf.nodes = laid.nodes.map((n: any) => ({
+            id: n.id,
+            type: n.type,
+            position: n.position,
+            data: n.data,
+          }));
+          wf.edges = laid.edges.map((e: any) => ({
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            label: e.label,
+          }));
           const saved = await api.workflows.create(wf);
           qc.invalidateQueries({ queryKey: ["workflows"] });
           setActiveWorkflowId(saved.id);

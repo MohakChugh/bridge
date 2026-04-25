@@ -35,24 +35,30 @@ export function WorkflowEditor() {
   });
   const { data: dirsData } = useQuery({ queryKey: ["directories"], queryFn: api.directories });
 
-  const defaultNodes: Node[] = existingWf?.nodes?.map((n: any) => ({
+  const rawNodes: Node[] = existingWf?.nodes?.map((n: any) => ({
     id: n.id,
     type: n.type,
-    position: n.position,
+    position: n.position || { x: 0, y: 0 },
     data: n.data || {},
   })) || [
     { id: "start-1", type: "start", position: { x: 250, y: 50 }, data: {} },
     { id: "end-1", type: "end", position: { x: 250, y: 400 }, data: {} },
   ];
 
-  const defaultEdges: Edge[] = existingWf?.edges?.map((e: any) => ({
-    id: e.id,
+  const rawEdges: Edge[] = existingWf?.edges?.map((e: any) => ({
+    id: e.id || `e-${e.source}-${e.target}`,
     source: e.source,
     target: e.target,
     label: e.label,
     markerEnd: { type: MarkerType.ArrowClosed, color: "hsl(240 5% 40%)" },
     style: { stroke: "hsl(240 5% 30%)" },
   })) || [];
+
+  // Auto-layout if any node is missing a real position (x=0, y=0)
+  const needsLayout = rawNodes.length > 2 && rawNodes.some((n) => n.position.x === 0 && n.position.y === 0);
+  const { nodes: defaultNodes, edges: defaultEdges } = needsLayout
+    ? layoutDagre(rawNodes, rawEdges)
+    : { nodes: rawNodes, edges: rawEdges };
 
   const [nodes, setNodes, onNodesChange] = useNodesState(defaultNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(defaultEdges);
