@@ -447,6 +447,84 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     from workflow_engine import WorkflowEngine
     wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config, daemon_ref=daemon_ref)
 
+    # ---- Shared Memory ----
+
+    @app.get("/api/memory/collections")
+    def list_memory_collections():
+        from shared_memory import get_shared_memory
+        return {"collections": get_shared_memory().list_collections()}
+
+    @app.post("/api/memory/collections")
+    def create_memory_collection(body: dict):
+        from shared_memory import get_shared_memory
+        name = body.get("name", "")
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        cid = get_shared_memory().create_collection(name, body.get("description", ""))
+        return {"id": cid, "name": name}
+
+    @app.delete("/api/memory/collections/{name}")
+    def delete_memory_collection(name: str):
+        from shared_memory import get_shared_memory
+        ok = get_shared_memory().delete_collection(name)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        return {"deleted": True}
+
+    @app.post("/api/memory/search")
+    def search_memory(body: dict):
+        from shared_memory import get_shared_memory
+        query = body.get("query", "")
+        if not query:
+            raise HTTPException(status_code=400, detail="query required")
+        collections = body.get("collections")
+        limit = body.get("limit", 5)
+        results = get_shared_memory().search(query, collections=collections, limit=limit)
+        return {"results": results, "query": query}
+
+    @app.post("/api/memory/add")
+    def add_to_memory(body: dict):
+        from shared_memory import get_shared_memory
+        text = body.get("text", "")
+        collection = body.get("collection", "")
+        if not text or not collection:
+            raise HTTPException(status_code=400, detail="text and collection required")
+        mid = get_shared_memory().add(text, collection, metadata=body.get("metadata"), source=body.get("source", "manual"))
+        return {"id": mid}
+
+    @app.delete("/api/memory/{mid}")
+    def delete_memory_entry(mid: int):
+        from shared_memory import get_shared_memory
+        ok = get_shared_memory().delete(mid)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Entry not found")
+        return {"deleted": True}
+
+    @app.get("/api/memory/stats")
+    def memory_stats():
+        from shared_memory import get_shared_memory
+        return get_shared_memory().stats()
+
+    @app.get("/api/memory/entries/{collection}")
+    def list_memory_entries(collection: str):
+        from shared_memory import get_shared_memory
+        return {"entries": get_shared_memory().list_entries(collection)}
+
+    @app.post("/api/memory/import")
+    def import_to_memory(body: dict):
+        from shared_memory import get_shared_memory
+        path = body.get("path", "")
+        collection = body.get("collection", "")
+        if not path or not collection:
+            raise HTTPException(status_code=400, detail="path and collection required")
+        if os.path.isdir(path):
+            count = get_shared_memory().import_directory(path, collection)
+        elif os.path.isfile(path):
+            count = get_shared_memory().import_file(path, collection)
+        else:
+            raise HTTPException(status_code=400, detail="Path not found")
+        return {"imported": count}
+
     @app.post("/api/variables/resolve")
     def resolve_variables_endpoint(body: dict):
         from variable_resolver import resolve_variables

@@ -72,6 +72,28 @@ export const api = {
     resume: (id: number) => request<any>(`/watches/${id}/resume`, { method: "POST" }),
   },
   activity: () => request<{ events: any[] }>("/activity"),
+
+  memory: {
+    collections: () => request<{ collections: any[] }>("/memory/collections"),
+    createCollection: (name: string, description?: string) =>
+      request<any>("/memory/collections", { method: "POST", body: JSON.stringify({ name, description }) }),
+    deleteCollection: (name: string) => request<any>(`/memory/collections/${name}`, { method: "DELETE" }),
+    search: (query: string, collections?: string[], limit?: number) =>
+      request<{ results: any[]; query: string }>("/memory/search", {
+        method: "POST", body: JSON.stringify({ query, collections, limit }),
+      }),
+    add: (text: string, collection: string, metadata?: any, source?: string) =>
+      request<{ id: number }>("/memory/add", {
+        method: "POST", body: JSON.stringify({ text, collection, metadata, source }),
+      }),
+    delete: (id: number) => request<any>(`/memory/${id}`, { method: "DELETE" }),
+    stats: () => request<any>("/memory/stats"),
+    entries: (collection: string) => request<{ entries: any[] }>(`/memory/entries/${collection}`),
+    import_: (path: string, collection: string) =>
+      request<{ imported: number }>("/memory/import", {
+        method: "POST", body: JSON.stringify({ path, collection }),
+      }),
+  },
   settings: {
     get: () => request<any>("/settings"),
     save: (body: any) => request<any>("/settings", { method: "POST", body: JSON.stringify(body) }),

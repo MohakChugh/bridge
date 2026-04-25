@@ -198,6 +198,25 @@ class SessionManager:
 
             threading.Thread(target=poll_process, daemon=True).start()
 
+            # Auto-inject memory context if enabled
+            use_memory = session.meta.get("use_memory", config.get("auto_memory_inject", True))
+            if use_memory:
+                try:
+                    from shared_memory import get_shared_memory, SIMILARITY_THRESHOLD
+                    mem = get_shared_memory()
+                    if mem.stats()["total_entries"] > 0:
+                        collections = session.meta.get("persona_collections")
+                        results = mem.search(prompt, collections=collections, limit=3)
+                        relevant = [r for r in results if r["score"] > SIMILARITY_THRESHOLD]
+                        if relevant:
+                            context = "CONTEXT FROM SHARED MEMORY:\n"
+                            for r in relevant:
+                                context += f"- [{r['collection']}] {r['text'][:200]}\n"
+                            context += "\nUSER REQUEST:\n"
+                            prompt = context + prompt
+                except Exception as e:
+                    log.debug(f"Memory injection skipped: {e}")
+
             spawn_kwargs = dict(
                 prompt=prompt,
                 cwd=session.cwd,

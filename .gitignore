@@ -13,3 +13,4 @@ workflow_runs.json
 AGENTS.md
 sessions.json
 artifacts/
+shared-memory.db
