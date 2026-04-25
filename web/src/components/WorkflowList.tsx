@@ -1,15 +1,17 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Workflow } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
-import { Card, CardContent, CardHeader, CardTitle, Badge, Button } from "./ui";
+import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Input } from "./ui";
 import { formatRelativeTime } from "@/lib/utils";
-import { Plus, Play, Pencil, Trash2, GitBranch, Calendar } from "lucide-react";
+import { Plus, Play, Pencil, Trash2, GitBranch, Calendar, X, Sparkles, CalendarOff } from "lucide-react";
 
 export function WorkflowList() {
   const qc = useQueryClient();
   const { setView, setActiveWorkflowId, setActiveRunId } = useSessionStore();
   const { data, isLoading } = useQuery({ queryKey: ["workflows"], queryFn: api.workflows.list });
   const workflows = data?.workflows ?? [];
+  const [scheduleDialogId, setScheduleDialogId] = useState<string | null>(null);
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.workflows.delete(id),
@@ -23,6 +25,11 @@ export function WorkflowList() {
       setActiveRunId(run.id);
       setView("workflow-runner");
     },
+  });
+
+  const unscheduleMut = useMutation({
+    mutationFn: (id: string) => api.workflows.unschedule(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
   });
 
   return (
@@ -77,6 +84,15 @@ export function WorkflowList() {
                   <Button size="sm" variant="outline" className="flex-1" onClick={() => runMut.mutate(wf.id)}>
                     <Play className="w-3 h-3" /> Run
                   </Button>
+                  {wf.schedule ? (
+                    <Button size="sm" variant="ghost" onClick={() => unscheduleMut.mutate(wf.id)} title="Remove schedule">
+                      <CalendarOff className="w-3 h-3 text-warning" />
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="ghost" onClick={() => setScheduleDialogId(wf.id)} title="Schedule">
+                      <Calendar className="w-3 h-3" />
+                    </Button>
+                  )}
                   <Button size="sm" variant="ghost" onClick={() => { setActiveWorkflowId(wf.id); setView("workflow-editor"); }}>
                     <Pencil className="w-3 h-3" />
                   </Button>
@@ -92,6 +108,78 @@ export function WorkflowList() {
           ))}
         </div>
       )}
+
+      {scheduleDialogId && (
+        <WorkflowScheduleDialog
+          workflowId={scheduleDialogId}
+          onClose={() => setScheduleDialogId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function WorkflowScheduleDialog({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
+  const [text, setText] = useState("");
+  const [parsed, setParsed] = useState<{ cron: string; human: string } | null>(null);
+  const qc = useQueryClient();
+
+  const parseMut = useMutation({
+    mutationFn: (t: string) => api.schedules.parse(t),
+    onSuccess: (data) => setParsed(data),
+  });
+
+  const scheduleMut = useMutation({
+    mutationFn: () => api.workflows.schedule(workflowId, { cron: parsed!.cron, human: parsed!.human }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      onClose();
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+      <div className="bg-card border border-border rounded-lg shadow-xl w-full max-w-md p-5 relative">
+        <button onClick={onClose} className="absolute right-3 top-3 text-muted-foreground hover:text-foreground">
+          <X className="w-4 h-4" />
+        </button>
+        <h2 className="font-semibold mb-4">Schedule workflow</h2>
+        {!parsed ? (
+          <>
+            <label className="text-xs font-medium text-muted-foreground block mb-1.5">When should it run?</label>
+            <Input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="every morning at 9am · weekdays at 5pm · every 2 hours"
+              autoFocus
+            />
+            <div className="flex justify-end mt-4">
+              <Button onClick={() => parseMut.mutate(text)} disabled={!text.trim() || parseMut.isPending}>
+                <Sparkles className="w-3.5 h-3.5" />
+                {parseMut.isPending ? "Parsing..." : "Parse"}
+              </Button>
+            </div>
+            {parseMut.isError && <div className="text-xs text-destructive mt-2">Could not parse — try different phrasing</div>}
+          </>
+        ) : (
+          <>
+            <div className="bg-accent/50 border border-border rounded-md p-3 space-y-2">
+              <div>
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Schedule</div>
+                <div className="text-sm font-medium">{parsed.human}</div>
+                <div className="text-xs text-muted-foreground font-mono mt-0.5">{parsed.cron}</div>
+              </div>
+            </div>
+            <div className="flex justify-between mt-4 gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setParsed(null)}>← Edit</Button>
+              <Button onClick={() => scheduleMut.mutate()} disabled={scheduleMut.isPending}>
+                <Calendar className="w-3.5 h-3.5" />
+                {scheduleMut.isPending ? "Scheduling..." : "Schedule"}
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

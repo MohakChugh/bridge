@@ -1333,9 +1333,10 @@ class Daemon:
         self._pending_schedule = None
 
     def _schedule_loop(self) -> None:
-        """Background thread that fires scheduled tasks."""
+        """Background thread that fires scheduled tasks + scheduled workflows."""
         while self.running:
             now = time.time()
+            # Fire scheduled tasks (reminders/prompts)
             tasks = self.state.get("scheduled_tasks", [])
             for task in tasks:
                 if task.get("status") != "active":
@@ -1343,9 +1344,30 @@ class Daemon:
                 if task.get("next_fire", 0) > 0 and now >= task["next_fire"]:
                     log.info(f"Firing scheduled task: {task.get('human', '?')}")
                     self._execute_scheduled_task(task)
-                    # Update next_fire
                     task["next_fire"] = next_cron_fire(task.get("cron", ""))
                     save_state(STATE_PATH, self.state)
+
+            # Fire scheduled workflows
+            try:
+                from workflow_store import load_workflows, upsert_workflow, WORKFLOWS_PATH
+                from workflow_engine import WorkflowEngine
+                for wf in load_workflows(WORKFLOWS_PATH):
+                    sched = wf.get("schedule")
+                    if not sched or not sched.get("cron"):
+                        continue
+                    nf = sched.get("next_fire", 0)
+                    if nf > 0 and now >= nf:
+                        log.info(f"Firing scheduled workflow: {wf.get('name', '?')}")
+                        if hasattr(self, 'session_manager'):
+                            from gateway import create_app
+                            # Use the engine instance — find it via gateway or create fresh
+                            engine = WorkflowEngine(self.session_manager, lambda: self.config, daemon_ref=self)
+                            engine.run(wf)
+                        sched["next_fire"] = next_cron_fire(sched["cron"])
+                        upsert_workflow(WORKFLOWS_PATH, wf)
+            except Exception as e:
+                log.warning(f"Workflow schedule check failed: {e}")
+
             time.sleep(60)
 
     def _execute_scheduled_task(self, task: dict) -> None:

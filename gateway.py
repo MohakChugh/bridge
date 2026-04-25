@@ -448,6 +448,39 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         ok = wf_engine.abort(run_id)
         return {"aborted": ok}
 
+    @app.post("/api/workflows/{wf_id}/schedule")
+    def schedule_workflow(wf_id: str, body: dict):
+        from scheduler import parse_schedule_via_llm, next_cron_fire
+        from adapters.base import get_login_shell_env
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        text = body.get("text", "")
+        cron = body.get("cron")
+        human = body.get("human")
+        if not cron and text:
+            env = get_login_shell_env()
+            parsed = parse_schedule_via_llm(text, env)
+            if not parsed:
+                raise HTTPException(status_code=400, detail="Could not parse schedule")
+            cron = parsed.get("cron")
+            human = parsed.get("human")
+        if not cron:
+            raise HTTPException(status_code=400, detail="No cron expression")
+        wf["schedule"] = {"cron": cron, "human": human or cron, "next_fire": next_cron_fire(cron)}
+        upsert_workflow(WORKFLOWS_PATH, wf)
+        get_event_bus().publish("workflow.scheduled", {"id": wf_id, "schedule": wf["schedule"]})
+        return wf
+
+    @app.delete("/api/workflows/{wf_id}/schedule")
+    def unschedule_workflow(wf_id: str):
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        wf["schedule"] = None
+        upsert_workflow(WORKFLOWS_PATH, wf)
+        return {"unscheduled": True}
+
     @app.get("/api/workflow-runs")
     def list_all_workflow_runs():
         runs = wf_engine.list_runs()

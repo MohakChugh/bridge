@@ -81,6 +81,9 @@ export const api = {
     getRun: (wfId: string, runId: string) => request<WorkflowRun>(`/workflows/${wfId}/runs/${runId}`),
     approve: (wfId: string, runId: string) => request<any>(`/workflows/${wfId}/runs/${runId}/approve`, { method: "POST" }),
     abort: (wfId: string, runId: string) => request<any>(`/workflows/${wfId}/runs/${runId}/abort`, { method: "POST" }),
+    schedule: (id: string, body: { text?: string; cron?: string; human?: string }) =>
+      request<any>(`/workflows/${id}/schedule`, { method: "POST", body: JSON.stringify(body) }),
+    unschedule: (id: string) => request<any>(`/workflows/${id}/schedule`, { method: "DELETE" }),
   },
 };
 
