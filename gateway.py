@@ -402,6 +402,31 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=500, detail="Failed to generate workflow")
         return wf
 
+    @app.post("/api/workflows/{wf_id}/refine")
+    def refine_workflow_endpoint(wf_id: str, body: dict):
+        from workflow_generator import refine_workflow
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        feedback = body.get("feedback", "")
+        if not feedback:
+            raise HTTPException(status_code=400, detail="feedback is required")
+        node_id = body.get("node_id")
+        scope = body.get("scope", "node_and_downstream")
+        refined = refine_workflow(wf, feedback, node_id=node_id, scope=scope)
+        if not refined:
+            raise HTTPException(status_code=500, detail="Failed to refine workflow")
+        refined["id"] = wf_id
+        upsert_workflow(WORKFLOWS_PATH, refined)
+        old_node_ids = {n["id"] for n in wf.get("nodes", [])}
+        new_node_ids = {n["id"] for n in refined.get("nodes", [])}
+        diff = {
+            "added": list(new_node_ids - old_node_ids),
+            "removed": list(old_node_ids - new_node_ids),
+            "changed": [n["id"] for n in refined["nodes"] if n["id"] in old_node_ids],
+        }
+        return {"workflow": refined, "diff": diff}
+
     @app.get("/api/workflows")
     def list_workflows():
         return {"workflows": load_workflows(WORKFLOWS_PATH)}

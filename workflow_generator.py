@@ -11,6 +11,104 @@ from adapters.base import get_login_shell_env
 
 log = logging.getLogger("workflow_generator")
 
+REFINE_PROMPT = """You are modifying an existing workflow DAG based on user feedback.
+
+Current workflow JSON:
+{workflow_json}
+
+{node_context}
+
+User feedback: {feedback}
+
+Scope: {scope_instruction}
+
+Available node types: start, prompt, branch, merge, delay, approval, notify, end.
+
+Rules:
+1. Keep the same "start" and "end" nodes
+2. Preserve node IDs that are unchanged
+3. Only modify what the feedback asks for
+4. Maintain valid DAG structure (all nodes connected, branches have merges)
+5. For prompt nodes, write detailed realistic prompts
+
+Reply with ONLY the complete updated workflow JSON (all nodes + all edges), no other text:
+{{"name": "...", "nodes": [...], "edges": [...]}}"""
+
+
+def refine_workflow(workflow: dict, feedback: str, node_id: Optional[str] = None, scope: str = "node_and_downstream") -> Optional[dict]:
+    """Refine an existing workflow based on user feedback."""
+    env = get_login_shell_env()
+
+    node_context = ""
+    if node_id:
+        target_node = next((n for n in workflow.get("nodes", []) if n["id"] == node_id), None)
+        if target_node:
+            node_context = f"Target node to modify: {json.dumps(target_node)}"
+
+    scope_instruction = {
+        "node_only": "Only modify the target node. Keep all other nodes and edges exactly as they are.",
+        "node_and_downstream": "Modify the target node AND all nodes connected downstream from it. Keep upstream nodes unchanged.",
+        "whole": "You may modify any part of the workflow to address the feedback.",
+    }.get(scope, "Modify as needed to address the feedback.")
+
+    wf_json = json.dumps({"name": workflow.get("name"), "nodes": workflow.get("nodes", []), "edges": workflow.get("edges", [])}, indent=2)
+
+    prompt = REFINE_PROMPT.format(
+        workflow_json=wf_json,
+        node_context=node_context,
+        feedback=feedback,
+        scope_instruction=scope_instruction,
+    )
+
+    cmd = (
+        "claude -p " + shlex.quote(prompt)
+        + " --output-format json --dangerously-skip-permissions --effort high"
+    )
+
+    try:
+        result = subprocess.run(
+            ["zsh", "-i", "-c", cmd],
+            capture_output=True, text=True, timeout=600, env=env,
+        )
+        if result.returncode != 0:
+            log.warning(f"Workflow refine failed: {result.stderr[:200]}")
+            return None
+
+        raw = result.stdout.strip()
+        try:
+            outer = json.loads(raw)
+            if isinstance(outer, dict) and "result" in outer:
+                raw = outer["result"]
+        except json.JSONDecodeError:
+            pass
+
+        if isinstance(raw, str):
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start >= 0 and end > start:
+                raw = raw[start:end]
+            wf = json.loads(raw)
+        else:
+            wf = raw
+
+        if not isinstance(wf, dict) or "nodes" not in wf:
+            log.warning("Invalid refined workflow JSON")
+            return None
+
+        wf = _normalize_workflow(wf)
+        wf["name"] = wf.get("name") or workflow.get("name", "Refined Workflow")
+        wf["tool"] = workflow.get("tool", "wasabi")
+        wf["cwd"] = workflow.get("cwd", "/tmp")
+
+        return wf
+
+    except subprocess.TimeoutExpired:
+        log.warning("Workflow refine timed out")
+        return None
+    except Exception as e:
+        log.warning(f"Workflow refine error: {e}")
+        return None
+
 
 def _normalize_workflow(wf: dict) -> dict:
     """Normalize LLM output to match expected schema.

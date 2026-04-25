@@ -19,10 +19,11 @@ import { api, type Workflow } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
 import { nodeTypes, NODE_MENU } from "./workflow-nodes";
 import { Button, Input, Textarea } from "./ui";
-import { Save, Play, Plus, ArrowLeft, Settings, X, Sparkles, LayoutGrid } from "lucide-react";
+import { Save, Play, Plus, ArrowLeft, Settings, X, Sparkles, LayoutGrid, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { layoutDagre } from "@/lib/dagre-layout";
 import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
+import { FeedbackPanel } from "./FeedbackPanel";
 
 export function WorkflowEditor() {
   const { activeWorkflowId, setView, setActiveWorkflowId, setActiveRunId } = useSessionStore();
@@ -68,6 +69,8 @@ export function WorkflowEditor() {
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [animatedNodes, setAnimatedNodes] = useState<Record<string, string>>({});
   const nodeIdCounter = useRef(10);
 
   const onConnect = useCallback((params: Connection) => {
@@ -127,10 +130,12 @@ export function WorkflowEditor() {
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setSelectedNode(node);
-    if (node.type !== "start" && node.type !== "end" && node.type !== "merge") {
+    if (feedbackOpen) {
+      // Feedback panel handles node selection internally
+    } else if (node.type !== "start" && node.type !== "end" && node.type !== "merge") {
       setConfigOpen(true);
     }
-  }, []);
+  }, [feedbackOpen]);
 
   const updateNodeData = (nodeId: string, newData: any) => {
     setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...newData } } : n)));
@@ -177,6 +182,10 @@ export function WorkflowEditor() {
         <Button size="sm" variant="outline" onClick={() => setGenerateOpen(true)}>
           <Sparkles className="w-3.5 h-3.5" />
           AI
+        </Button>
+        <Button size="sm" variant={feedbackOpen ? "default" : "outline"} onClick={() => { setFeedbackOpen(!feedbackOpen); setConfigOpen(false); }}>
+          <MessageCircle className="w-3.5 h-3.5" />
+          Feedback
         </Button>
         <Button size="sm" variant="outline" onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
           <Save className="w-3.5 h-3.5" />
@@ -318,6 +327,46 @@ export function WorkflowEditor() {
           </div>
         )}
       </div>
+
+      {/* Feedback Panel */}
+      {feedbackOpen && (
+        <div className="absolute right-0 top-0 bottom-0 z-20">
+          <FeedbackPanel
+            workflowId={activeWorkflowId}
+            selectedNode={selectedNode ? { id: selectedNode.id, type: selectedNode.type, data: selectedNode.data } : null}
+            onClose={() => setFeedbackOpen(false)}
+            onRefined={(wf, diff) => {
+              const rfNodes = (wf.nodes || []).map((n: any) => ({
+                id: n.id,
+                type: n.type,
+                position: n.position || { x: 0, y: 0 },
+                data: n.data || {},
+              }));
+              const rfEdges = (wf.edges || []).map((e: any) => ({
+                id: e.id || `e-${e.source}-${e.target}`,
+                source: e.source,
+                target: e.target,
+                label: e.label,
+                markerEnd: { type: MarkerType.ArrowClosed, color: "hsl(240 5% 40%)" },
+                style: { stroke: "hsl(240 5% 30%)" },
+              }));
+              const needsLayout = rfNodes.some((n: any) => n.position.x === 0 && n.position.y === 0);
+              const laid = needsLayout ? layoutDagre(rfNodes, rfEdges) : { nodes: rfNodes, edges: rfEdges };
+
+              // Apply animation classes
+              const anims: Record<string, string> = {};
+              for (const id of diff.added || []) anims[id] = "node-added";
+              for (const id of diff.changed || []) anims[id] = "node-updated";
+              setAnimatedNodes(anims);
+              setTimeout(() => setAnimatedNodes({}), 2500);
+
+              setNodes(laid.nodes.map((n: any) => ({ ...n, className: anims[n.id] || "" })));
+              setEdges(laid.edges);
+              if (wf.name) setWfName(wf.name);
+            }}
+          />
+        </div>
+      )}
 
       <GenerateWorkflowDialog
         open={generateOpen}

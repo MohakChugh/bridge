@@ -5,9 +5,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Input } from "./ui";
 import { formatRelativeTime } from "@/lib/utils";
 import { Plus, Play, Pencil, Trash2, GitBranch, Calendar, X, Sparkles, CalendarOff } from "lucide-react";
-import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 import { layoutDagre } from "@/lib/dagre-layout";
-import { MarkerType } from "@xyflow/react";
 
 export function WorkflowList() {
   const qc = useQueryClient();
@@ -15,7 +13,6 @@ export function WorkflowList() {
   const { data, isLoading } = useQuery({ queryKey: ["workflows"], queryFn: api.workflows.list });
   const workflows = data?.workflows ?? [];
   const [scheduleDialogId, setScheduleDialogId] = useState<string | null>(null);
-  const [generateOpen, setGenerateOpen] = useState(false);
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.workflows.delete(id),
@@ -46,16 +43,10 @@ export function WorkflowList() {
             <p className="text-xs text-muted-foreground mt-0.5">{workflows.length} total</p>
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={() => setGenerateOpen(true)}>
-            <Sparkles className="w-3.5 h-3.5" />
-            Generate with AI
-          </Button>
-          <Button size="sm" onClick={() => { setActiveWorkflowId(null); setView("workflow-editor"); }}>
-            <Plus className="w-3.5 h-3.5" />
-            New workflow
-          </Button>
-        </div>
+        <Button size="sm" onClick={() => { setActiveWorkflowId(null); setView("workflow-editor"); }}>
+          <Plus className="w-3.5 h-3.5" />
+          New workflow
+        </Button>
       </div>
 
       {isLoading ? (
@@ -118,43 +109,6 @@ export function WorkflowList() {
           ))}
         </div>
       )}
-
-      <GenerateWorkflowDialog
-        open={generateOpen}
-        onClose={() => setGenerateOpen(false)}
-        onGenerated={async (wf) => {
-          // Ensure all nodes have positions via dagre layout before saving
-          const rfNodes = (wf.nodes || []).map((n: any) => ({
-            id: n.id,
-            type: n.type,
-            position: n.position || { x: 0, y: 0 },
-            data: n.data || {},
-          }));
-          const rfEdges = (wf.edges || []).map((e: any) => ({
-            id: e.id || `e-${e.source}-${e.target}`,
-            source: e.source,
-            target: e.target,
-            label: e.label,
-          }));
-          const laid = layoutDagre(rfNodes, rfEdges);
-          wf.nodes = laid.nodes.map((n: any) => ({
-            id: n.id,
-            type: n.type,
-            position: n.position,
-            data: n.data,
-          }));
-          wf.edges = laid.edges.map((e: any) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            label: e.label,
-          }));
-          const saved = await api.workflows.create(wf);
-          qc.invalidateQueries({ queryKey: ["workflows"] });
-          setActiveWorkflowId(saved.id);
-          setView("workflow-editor");
-        }}
-      />
 
       {scheduleDialogId && (
         <WorkflowScheduleDialog

@@ -86,6 +86,11 @@ export const api = {
     unschedule: (id: string) => request<any>(`/workflows/${id}/schedule`, { method: "DELETE" }),
     generate: (body: { text: string; tool?: string; cwd?: string }) =>
       request<any>("/workflows/generate", { method: "POST", body: JSON.stringify(body) }),
+    refine: (id: string, body: { feedback: string; node_id?: string | null; scope?: string }) =>
+      request<{ workflow: Workflow; diff: { added: string[]; removed: string[]; changed: string[] } }>(
+        `/workflows/${id}/refine`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
   },
 };
 
