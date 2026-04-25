@@ -81,8 +81,35 @@ export function WorkflowList() {
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {wf.nodes?.length || 0} nodes · {wf.edges?.length || 0} edges
+                  {wf.variables?.length > 0 && <span> · {wf.variables.length} vars</span>}
                 </div>
-                {wf.schedule && (
+                {/* Show all schedules with params */}
+                {(wf.schedules || []).length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {(wf.schedules || []).map((sched: any) => (
+                      <div key={sched.id} className="flex items-center gap-1.5 text-[10px] flex-wrap">
+                        <Calendar className="w-2.5 h-2.5 text-success shrink-0" />
+                        <span className="text-success font-medium">{sched.label || sched.human}</span>
+                        <span className="text-muted-foreground">{sched.human}</span>
+                        {sched.params && Object.keys(sched.params).length > 0 && (
+                          <>
+                            <span className="text-muted-foreground">·</span>
+                            {Object.entries(sched.params).map(([k, v]: [string, any]) => (
+                              <span key={k} className="px-1 py-0.5 rounded bg-primary/10 text-primary text-[9px]">
+                                {k}={String(v).length > 15 ? String(v).slice(0, 15) + "…" : String(v)}
+                              </span>
+                            ))}
+                          </>
+                        )}
+                        {sched.next_fire && (
+                          <span className="text-muted-foreground">next: {new Date(sched.next_fire * 1000).toLocaleDateString()}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Old single schedule fallback */}
+                {wf.schedule && !(wf.schedules || []).length && (
                   <div className="text-xs text-success flex items-center gap-1 mt-1">
                     <Calendar className="w-3 h-3" /> {wf.schedule.human || wf.schedule.cron}
                   </div>
@@ -93,15 +120,9 @@ export function WorkflowList() {
                   <Button size="sm" variant="outline" className="flex-1" onClick={() => runMut.mutate(wf.id)}>
                     <Play className="w-3 h-3" /> Run
                   </Button>
-                  {wf.schedule ? (
-                    <Button size="sm" variant="ghost" onClick={() => unscheduleMut.mutate(wf.id)} title="Remove schedule">
-                      <CalendarOff className="w-3 h-3 text-warning" />
-                    </Button>
-                  ) : (
-                    <Button size="sm" variant="ghost" onClick={() => setScheduleDialogId(wf.id)} title="Schedule">
-                      <Calendar className="w-3 h-3" />
-                    </Button>
-                  )}
+                  <Button size="sm" variant="ghost" onClick={() => setScheduleDialogId(wf.id)} title="Add schedule">
+                    <Calendar className="w-3 h-3" />
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => { setActiveWorkflowId(wf.id); setView("workflow-editor"); }}>
                     <Pencil className="w-3 h-3" />
                   </Button>
