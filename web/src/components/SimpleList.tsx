@@ -22,6 +22,7 @@ export function RemindersList() {
   });
 
   return (
+    <>
     <ListPage
       title="Reminders"
       icon={Bell}
@@ -56,8 +57,9 @@ export function RemindersList() {
           </CardContent>
         </Card>
       ))}
-      <ReminderDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
     </ListPage>
+    <ReminderDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+    </>
   );
 }
 
@@ -103,6 +105,7 @@ export function SchedulesList() {
   });
 
   return (
+    <>
     <ListPage
       title="Schedules"
       icon={Calendar}
@@ -182,8 +185,9 @@ export function SchedulesList() {
           </CardContent>
         </Card>
       ))}
-      <ScheduleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
     </ListPage>
+    <ScheduleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+    </>
   );
 }
 
@@ -211,6 +215,7 @@ export function WatchesList() {
   });
 
   return (
+    <>
     <ListPage
       title="Watches"
       icon={Eye}
@@ -260,8 +265,9 @@ export function WatchesList() {
           </CardContent>
         </Card>
       ))}
-      <WatchDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
     </ListPage>
+    <WatchDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+    </>
   );
 }
 
