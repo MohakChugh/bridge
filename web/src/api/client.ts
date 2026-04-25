@@ -100,6 +100,18 @@ export const api = {
         method: "POST", body: JSON.stringify({ path, collection }),
       }),
   },
+
+  knowledge: {
+    documents: () => request<{ documents: any[] }>("/knowledge/documents"),
+    registerDocument: (body: any) => request<any>("/knowledge/documents", { method: "POST", body: JSON.stringify(body) }),
+    deleteDocument: (id: string) => request<any>(`/knowledge/documents/${id}`, { method: "DELETE" }),
+    refreshDocument: (id: string) => request<any>(`/knowledge/documents/${id}/refresh`, { method: "POST" }),
+    refreshAll: () => request<any>("/knowledge/refresh-all", { method: "POST" }),
+    tags: () => request<{ tags: any[] }>("/knowledge/tags"),
+    graph: () => request<{ nodes: any[]; edges: any[] }>("/knowledge/graph"),
+    createEdge: (body: any) => request<any>("/knowledge/graph/edges", { method: "POST", body: JSON.stringify(body) }),
+    deleteEdge: (id: number) => request<any>(`/knowledge/graph/edges/${id}`, { method: "DELETE" }),
+  },
   settings: {
     get: () => request<any>("/settings"),
     save: (body: any) => request<any>("/settings", { method: "POST", body: JSON.stringify(body) }),

@@ -70,10 +70,59 @@ class SharedMemory:
                 embedding BLOB,
                 metadata TEXT DEFAULT '{}',
                 source TEXT DEFAULT 'manual',
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                document_id TEXT,
+                chunk_index INTEGER,
+                summary TEXT,
+                tags TEXT DEFAULT '[]'
             );
             CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_document ON memories(document_id);
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_url TEXT,
+                collection TEXT NOT NULL,
+                chunk_count INTEGER DEFAULT 0,
+                tags TEXT DEFAULT '[]',
+                persona TEXT,
+                last_refreshed REAL,
+                created_at REAL NOT NULL,
+                metadata TEXT DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                relation TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_tags (
+                memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
+                tag_id INTEGER REFERENCES tags(id),
+                PRIMARY KEY (memory_id, tag_id)
+            );
         """)
+        # Migrate existing memories table if columns missing
+        try:
+            self.db.execute("SELECT document_id FROM memories LIMIT 1")
+        except sqlite3.OperationalError:
+            self.db.execute("ALTER TABLE memories ADD COLUMN document_id TEXT")
+            self.db.execute("ALTER TABLE memories ADD COLUMN chunk_index INTEGER")
+            self.db.execute("ALTER TABLE memories ADD COLUMN summary TEXT")
+            self.db.execute("ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'")
         self.db.commit()
 
     def _get_model(self):
@@ -233,6 +282,132 @@ class SharedMemory:
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         items = [{"text": chunk, "metadata": {"file": os.path.basename(path)}, "source": "import"} for chunk in chunks if chunk.strip()]
         return self.add_batch(items, collection)
+
+    # ---- Documents ----
+
+    def register_document(self, name: str, source_type: str, source_url: str, collection: str, tags: Optional[list[str]] = None, persona: Optional[str] = None) -> str:
+        import uuid
+        doc_id = str(uuid.uuid4())[:12]
+        self.db.execute(
+            "INSERT OR REPLACE INTO documents (id, name, source_type, source_url, collection, tags, persona, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, name, source_type, source_url, collection, json.dumps(tags or []), persona, time.time()),
+        )
+        self.db.commit()
+        self.create_collection(collection)
+        return doc_id
+
+    def list_documents(self) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM documents ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_document(self, doc_id: str) -> Optional[dict]:
+        row = self.db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_document(self, doc_id: str) -> bool:
+        self.db.execute("DELETE FROM memories WHERE document_id = ?", (doc_id,))
+        self.db.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        self.db.commit()
+        return True
+
+    def update_document_chunks(self, doc_id: str, chunk_count: int) -> None:
+        self.db.execute("UPDATE documents SET chunk_count = ?, last_refreshed = ? WHERE id = ?", (chunk_count, time.time(), doc_id))
+        self.db.commit()
+
+    def refresh_document(self, doc_id: str) -> None:
+        self.db.execute("DELETE FROM memories WHERE document_id = ?", (doc_id,))
+        self.db.execute("DELETE FROM edges WHERE source_id IN (SELECT id FROM memories WHERE document_id = ?) OR target_id IN (SELECT id FROM memories WHERE document_id = ?)", (doc_id, doc_id))
+        self.db.commit()
+
+    # ---- Edges (Knowledge Graph) ----
+
+    def create_edge(self, source_id: int, target_id: int, relation: str, metadata: Optional[dict] = None) -> int:
+        cur = self.db.execute(
+            "INSERT INTO edges (source_id, target_id, relation, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            (source_id, target_id, relation, json.dumps(metadata or {}), time.time()),
+        )
+        self.db.commit()
+        return cur.lastrowid
+
+    def get_edges(self, memory_id: Optional[int] = None) -> list[dict]:
+        if memory_id:
+            rows = self.db.execute("SELECT * FROM edges WHERE source_id = ? OR target_id = ?", (memory_id, memory_id)).fetchall()
+        else:
+            rows = self.db.execute("SELECT * FROM edges").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_graph(self) -> dict:
+        edges = self.db.execute("SELECT e.*, m1.text as source_text, m2.text as target_text FROM edges e LEFT JOIN memories m1 ON m1.id = e.source_id LEFT JOIN memories m2 ON m2.id = e.target_id").fetchall()
+        nodes_set = set()
+        node_list = []
+        edge_list = []
+        for e in edges:
+            for nid, text in [(e["source_id"], e["source_text"]), (e["target_id"], e["target_text"])]:
+                if nid not in nodes_set:
+                    nodes_set.add(nid)
+                    node_list.append({"id": nid, "text": (text or "")[:100]})
+            edge_list.append({"source": e["source_id"], "target": e["target_id"], "relation": e["relation"]})
+        return {"nodes": node_list, "edges": edge_list}
+
+    def delete_edge(self, edge_id: int) -> bool:
+        cur = self.db.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    # ---- Tags ----
+
+    def add_tags(self, memory_id: int, tag_names: list[str]) -> None:
+        for name in tag_names:
+            self.db.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+            tag_row = self.db.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
+            if tag_row:
+                self.db.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (memory_id, tag_row["id"]))
+        self.db.commit()
+
+    def list_tags(self) -> list[dict]:
+        rows = self.db.execute("""
+            SELECT t.name, COUNT(mt.memory_id) as count
+            FROM tags t LEFT JOIN memory_tags mt ON mt.tag_id = t.id
+            GROUP BY t.id ORDER BY count DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_by_tags(self, tag_names: list[str], limit: int = 20) -> list[dict]:
+        placeholders = ",".join("?" for _ in tag_names)
+        rows = self.db.execute(f"""
+            SELECT DISTINCT m.id, m.text, m.summary, m.tags, m.source, m.created_at, c.name as collection
+            FROM memories m
+            JOIN collections c ON c.id = m.collection_id
+            JOIN memory_tags mt ON mt.memory_id = m.id
+            JOIN tags t ON t.id = mt.tag_id
+            WHERE t.name IN ({placeholders})
+            ORDER BY m.created_at DESC
+            LIMIT ?
+        """, (*tag_names, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- Enhanced Add (with tags + document_id) ----
+
+    def add_enriched(self, text: str, collection: str, document_id: Optional[str] = None,
+                     chunk_index: Optional[int] = None, summary: Optional[str] = None,
+                     tags: Optional[list[str]] = None, metadata: Optional[dict] = None,
+                     source: str = "manual") -> int:
+        cid = self._get_collection_id(collection)
+        if cid is None:
+            cid = self.create_collection(collection)
+        vec = self._embed(summary or text)
+        cur = self.db.execute(
+            """INSERT INTO memories (collection_id, text, embedding, metadata, source, created_at,
+               document_id, chunk_index, summary, tags)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, text, _serialize_vector(vec), json.dumps(metadata or {}), source, time.time(),
+             document_id, chunk_index, summary, json.dumps(tags or [])),
+        )
+        mid = cur.lastrowid
+        self.db.commit()
+        if tags:
+            self.add_tags(mid, tags)
+        return mid
 
     def import_directory(self, dir_path: str, collection: str, extensions: Optional[list[str]] = None) -> int:
         extensions = extensions or [".md", ".py", ".txt", ".json", ".yaml", ".yml"]

@@ -525,6 +525,107 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=400, detail="Path not found")
         return {"imported": count}
 
+    # ---- Knowledge Base ----
+
+    @app.get("/api/knowledge/documents")
+    def list_kb_documents():
+        from shared_memory import get_shared_memory
+        return {"documents": get_shared_memory().list_documents()}
+
+    @app.post("/api/knowledge/documents")
+    def register_kb_document(body: dict):
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        name = body.get("name", "")
+        source_type = body.get("source_type", "file")
+        source_url = body.get("source_url", "")
+        collection = body.get("collection", "default")
+        tags = body.get("tags", [])
+        persona = body.get("persona")
+        if not name or not source_url:
+            raise HTTPException(status_code=400, detail="name and source_url required")
+        doc_id = mem.register_document(name, source_type, source_url, collection, tags, persona)
+        return {"id": doc_id, "name": name, "status": "registered"}
+
+    @app.delete("/api/knowledge/documents/{doc_id}")
+    def delete_kb_document(doc_id: str):
+        from shared_memory import get_shared_memory
+        get_shared_memory().delete_document(doc_id)
+        return {"deleted": True}
+
+    @app.post("/api/knowledge/documents/{doc_id}/refresh")
+    def refresh_kb_document(doc_id: str):
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        doc = mem.get_document(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        mem.refresh_document(doc_id)
+        # Re-ingest based on source type
+        source_type = doc["source_type"]
+        source_url = doc["source_url"]
+        collection = doc["collection"]
+        if source_type in ("file", "code"):
+            if os.path.isdir(source_url):
+                count = mem.import_directory(source_url, collection)
+            elif os.path.isfile(source_url):
+                count = mem.import_file(source_url, collection)
+            else:
+                count = 0
+            mem.update_document_chunks(doc_id, count)
+            return {"refreshed": True, "chunks": count}
+        return {"refreshed": True, "chunks": 0, "note": "URL refresh requires ingestion pipeline"}
+
+    @app.post("/api/knowledge/refresh-all")
+    def refresh_all_kb():
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        results = []
+        for doc in mem.list_documents():
+            doc_id = doc["id"]
+            mem.refresh_document(doc_id)
+            source_type = doc["source_type"]
+            source_url = doc["source_url"]
+            collection = doc["collection"]
+            count = 0
+            if source_type in ("file", "code") and os.path.exists(source_url):
+                if os.path.isdir(source_url):
+                    count = mem.import_directory(source_url, collection)
+                else:
+                    count = mem.import_file(source_url, collection)
+            mem.update_document_chunks(doc_id, count)
+            results.append({"id": doc_id, "name": doc["name"], "chunks": count})
+        return {"refreshed": len(results), "documents": results}
+
+    @app.get("/api/knowledge/tags")
+    def list_kb_tags():
+        from shared_memory import get_shared_memory
+        return {"tags": get_shared_memory().list_tags()}
+
+    @app.get("/api/knowledge/graph")
+    def get_kb_graph():
+        from shared_memory import get_shared_memory
+        return get_shared_memory().get_graph()
+
+    @app.post("/api/knowledge/graph/edges")
+    def create_kb_edge(body: dict):
+        from shared_memory import get_shared_memory
+        source_id = body.get("source_id")
+        target_id = body.get("target_id")
+        relation = body.get("relation", "related")
+        if not source_id or not target_id:
+            raise HTTPException(status_code=400, detail="source_id and target_id required")
+        eid = get_shared_memory().create_edge(source_id, target_id, relation)
+        return {"id": eid}
+
+    @app.delete("/api/knowledge/graph/edges/{eid}")
+    def delete_kb_edge(eid: int):
+        from shared_memory import get_shared_memory
+        ok = get_shared_memory().delete_edge(eid)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Edge not found")
+        return {"deleted": True}
+
     # ---- Personas ----
 
     @app.get("/api/personas")
