@@ -45,13 +45,13 @@ def generate_workflow(text: str, tool: str = "wasabi", cwd: str = "/tmp") -> Opt
 
     cmd = (
         "claude -p " + shlex.quote(prompt)
-        + " --output-format json --dangerously-skip-permissions --effort low"
+        + " --output-format json --dangerously-skip-permissions --effort high"
     )
 
     try:
         result = subprocess.run(
             ["zsh", "-i", "-c", cmd],
-            capture_output=True, text=True, timeout=60, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         if result.returncode != 0:
             log.warning(f"Workflow generation failed: {result.stderr[:200]}")
