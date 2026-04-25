@@ -19,8 +19,10 @@ import { api, type Workflow } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
 import { nodeTypes, NODE_MENU } from "./workflow-nodes";
 import { Button, Input, Textarea } from "./ui";
-import { Save, Play, Plus, ArrowLeft, Settings, X } from "lucide-react";
+import { Save, Play, Plus, ArrowLeft, Settings, X, Sparkles, LayoutGrid } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { layoutDagre } from "@/lib/dagre-layout";
+import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 
 export function WorkflowEditor() {
   const { activeWorkflowId, setView, setActiveWorkflowId, setActiveRunId } = useSessionStore();
@@ -59,6 +61,7 @@ export function WorkflowEditor() {
   const [wfCwd, setWfCwd] = useState(existingWf?.cwd || Object.values(dirsData || {})[0] || "/tmp");
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [generateOpen, setGenerateOpen] = useState(false);
   const nodeIdCounter = useRef(10);
 
   const onConnect = useCallback((params: Connection) => {
@@ -148,12 +151,27 @@ export function WorkflowEditor() {
             + {item.label}
           </button>
         ))}
+        <button
+          onClick={() => {
+            const result = layoutDagre(nodes, edges);
+            setNodes(result.nodes);
+          }}
+          className="px-2 py-1 rounded text-[10px] font-semibold uppercase bg-muted text-muted-foreground hover:text-foreground"
+          title="Auto-layout"
+        >
+          <LayoutGrid className="w-3 h-3 inline mr-1" />
+          Layout
+        </button>
         <div className="flex-1" />
         <select value={wfTool} onChange={(e) => setWfTool(e.target.value)} className="h-8 rounded border border-border bg-transparent px-2 text-xs">
           <option value="claude">Claude</option>
           <option value="wasabi">Wasabi</option>
           <option value="kiro">Kiro</option>
         </select>
+        <Button size="sm" variant="outline" onClick={() => setGenerateOpen(true)}>
+          <Sparkles className="w-3.5 h-3.5" />
+          AI
+        </Button>
         <Button size="sm" variant="outline" onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
           <Save className="w-3.5 h-3.5" />
           {saveMut.isPending ? "Saving..." : "Save"}
@@ -294,6 +312,34 @@ export function WorkflowEditor() {
           </div>
         )}
       </div>
+
+      <GenerateWorkflowDialog
+        open={generateOpen}
+        onClose={() => setGenerateOpen(false)}
+        defaultTool={wfTool}
+        onGenerated={(wf) => {
+          const rfNodes = (wf.nodes || []).map((n: any) => ({
+            id: n.id,
+            type: n.type,
+            position: n.position || { x: 250, y: 0 },
+            data: n.data || {},
+          }));
+          const rfEdges = (wf.edges || []).map((e: any) => ({
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            label: e.label,
+            markerEnd: { type: MarkerType.ArrowClosed, color: "hsl(240 5% 40%)" },
+            style: { stroke: "hsl(240 5% 30%)" },
+          }));
+          const laid = layoutDagre(rfNodes, rfEdges);
+          setNodes(laid.nodes);
+          setEdges(laid.edges);
+          if (wf.name) setWfName(wf.name);
+          if (wf.tool) setWfTool(wf.tool);
+          if (wf.cwd) setWfCwd(wf.cwd);
+        }}
+      />
     </div>
   );
 }

@@ -389,6 +389,19 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     from workflow_engine import WorkflowEngine
     wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config, daemon_ref=daemon_ref)
 
+    @app.post("/api/workflows/generate")
+    def generate_workflow_endpoint(body: dict):
+        from workflow_generator import generate_workflow
+        text = body.get("text", "")
+        tool = body.get("tool", daemon_ref.config.get("cli_tool", "wasabi"))
+        cwd = body.get("cwd", daemon_ref.config["directories"].get("default", "/tmp"))
+        if not text:
+            raise HTTPException(status_code=400, detail="text is required")
+        wf = generate_workflow(text, tool=tool, cwd=cwd)
+        if not wf:
+            raise HTTPException(status_code=500, detail="Failed to generate workflow")
+        return wf
+
     @app.get("/api/workflows")
     def list_workflows():
         return {"workflows": load_workflows(WORKFLOWS_PATH)}

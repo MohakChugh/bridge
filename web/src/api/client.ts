@@ -84,6 +84,8 @@ export const api = {
     schedule: (id: string, body: { text?: string; cron?: string; human?: string }) =>
       request<any>(`/workflows/${id}/schedule`, { method: "POST", body: JSON.stringify(body) }),
     unschedule: (id: string) => request<any>(`/workflows/${id}/schedule`, { method: "DELETE" }),
+    generate: (body: { text: string; tool?: string; cwd?: string }) =>
+      request<any>("/workflows/generate", { method: "POST", body: JSON.stringify(body) }),
   },
 };
 
