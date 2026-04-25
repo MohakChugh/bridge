@@ -325,9 +325,27 @@ class WorkflowEngine:
     def _execute_notify(self, wf_run, node, ns):
         data = node.get("data", {})
         channel = data.get("channel", "imessage")
-        message = data.get("message", "Workflow notification")
+        prompt = data.get("message", "Summarize what happened")
         wait_for_ack = data.get("wait_for_ack", False)
 
+        # Run the message text as a prompt against the session's LLM.
+        # The LLM has full conversation context from prior nodes —
+        # it can compose a meaningful notification with failure details,
+        # root causes, suggested fixes, etc.
+        composed = prompt
+        if wf_run.session_id:
+            try:
+                composed = self._run_prompt(
+                    wf_run.session_id,
+                    f"Compose a brief notification message for the following request. "
+                    f"Use the conversation context above. Keep under 500 chars. "
+                    f"Request: {prompt}"
+                )
+            except Exception as e:
+                log.warning(f"Notify LLM compose failed, using raw message: {e}")
+                composed = prompt
+
+        notification = f"[WF: {wf_run.workflow_name}] {composed}"
         sent_to = []
 
         if channel in ("imessage", "both"):
@@ -336,7 +354,7 @@ class WorkflowEngine:
                     from sender import send_imessage
                     guid = self._daemon_ref.config.get("reply_chat_guid")
                     if guid:
-                        send_imessage(guid, f"[Workflow: {wf_run.workflow_name}] {message}")
+                        send_imessage(guid, notification)
                         sent_to.append("iMessage")
                 except Exception as e:
                     log.warning(f"Notify iMessage failed: {e}")
@@ -353,7 +371,7 @@ class WorkflowEngine:
                                 dm_channel = result["channel"]["id"]
                                 self._daemon_ref._slack_channel.app.client.chat_postMessage(
                                     channel=dm_channel,
-                                    text=f"*[Workflow: {wf_run.workflow_name}]* {message}",
+                                    text=f"*{notification}*",
                                 )
                                 sent_to.append("Slack")
                                 break
@@ -362,7 +380,7 @@ class WorkflowEngine:
                 except Exception as e:
                     log.warning(f"Notify Slack failed: {e}")
 
-        ns.output = f"Sent to: {', '.join(sent_to) or 'none'}"
+        ns.output = f"Sent to: {', '.join(sent_to) or 'none'}\n\n{composed}"
         self._bus.publish("workflow.notify.sent", {
             "run_id": wf_run.id,
             "node_id": node["id"],
