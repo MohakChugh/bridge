@@ -115,8 +115,11 @@ class WasabiAdapter(BaseAdapter):
             # Inject prior conversation into the prompt ourselves to maintain continuity.
             history_block = _format_history_for_prompt(history or [])
 
-            # Prepend brief instruction since wasabi has no --append-system-prompt
-            full_prompt = BRIEF_PREFIX + history_block + prompt
+            # Skip caveman prefix in parsing mode — need clean JSON output
+            if cfg.get("_parsing_mode"):
+                full_prompt = prompt
+            else:
+                full_prompt = BRIEF_PREFIX + history_block + prompt
 
             # Use full path — toolbox may not be in launchd's PATH
             wasabi_bin = self._find_wasabi_path()

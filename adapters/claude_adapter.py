@@ -49,8 +49,9 @@ class ClaudeAdapter(BaseAdapter):
                 "claude -p " + shlex.quote(prompt)
                 + " --output-format json --dangerously-skip-permissions"
                 + f" --effort {shlex.quote(effort)}"
-                + " --append-system-prompt " + shlex.quote(BRIEF_INSTRUCTION)
             )
+            if not cfg.get("_parsing_mode"):
+                cmd += " --append-system-prompt " + shlex.quote(BRIEF_INSTRUCTION)
             if resume_session_id:
                 cmd += " --resume " + shlex.quote(resume_session_id)
 

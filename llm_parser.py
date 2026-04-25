@@ -35,11 +35,15 @@ def parse_with_llm(prompt: str, config: dict, timeout: int = 120) -> Optional[st
         return None
 
     try:
+        # Override config to disable caveman mode for parsing — we need clean JSON output
+        parse_config = dict(config)
+        parse_config["_parsing_mode"] = True
+
         result = adapter.spawn(
             prompt=prompt,
             cwd="/tmp",
             timeout=timeout,
-            config=config,
+            config=parse_config,
         )
         if result.get("success") and result.get("output"):
             return result["output"]
@@ -140,8 +144,20 @@ def extract_json(text: str) -> Optional[dict]:
 
     # Try longest candidate first (most likely to be the full JSON)
     for candidate in sorted(candidates, key=len, reverse=True):
+        # Try as-is first
         try:
             data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fix common LLM JSON issues: literal newlines in strings, trailing commas
+        cleaned = candidate.replace("\n", " ").replace("\r", " ")
+        cleaned = re.sub(r',\s*}', '}', cleaned)  # trailing comma
+        cleaned = re.sub(r',\s*]', ']', cleaned)  # trailing comma in arrays
+        try:
+            data = json.loads(cleaned)
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, ValueError):
