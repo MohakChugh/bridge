@@ -258,7 +258,7 @@ cd ~/bridge
 pip3 install slack-bolt slack-sdk fastapi uvicorn
 cp config.example.json config.json  # Edit: Slack tokens, directories
 python3 daemon.py
-# SSH tunnel: ssh -L 7777:localhost:7777 remote-server
+# SSH tunnel for remote: ssh -L 7777:localhost:7777 your-server
 ```
 
 ## Tests

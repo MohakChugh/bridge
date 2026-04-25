@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 workflows.json
 workflow_runs.json
+AGENTS.md

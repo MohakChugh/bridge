@@ -302,7 +302,7 @@ class TestStuckDetectorFormat:
         diag = {
             "elapsed": 5520,
             "stale_minutes": 15,
-            "child_commands": ["ada credentials update --account 435829"],
+            "child_commands": ["ada credentials update --account 123456789012"],
             "child_pids": ["79779"],
             "alert_number": 1,
             "max_alerts": 3,
