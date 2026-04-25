@@ -15,7 +15,7 @@ from typing import Optional
 log = logging.getLogger("llm_parser")
 
 
-def parse_with_llm(prompt: str, config: dict, timeout: int = 120) -> Optional[str]:
+def parse_with_llm(prompt: str, config: dict, timeout: int = 180) -> Optional[str]:
     """Send prompt to the configured parsing tool and return raw output.
 
     Routes through the adapter system — works with claude, wasabi, kiro,
@@ -54,7 +54,7 @@ def parse_with_llm(prompt: str, config: dict, timeout: int = 120) -> Optional[st
         return None
 
 
-def parse_json_with_llm(prompt: str, config: dict, timeout: int = 120) -> Optional[dict]:
+def parse_json_with_llm(prompt: str, config: dict, timeout: int = 180) -> Optional[dict]:
     """Send prompt and extract JSON from response.
 
     Handles tools that don't support --output-format json by extracting

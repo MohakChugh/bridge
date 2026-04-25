@@ -835,7 +835,7 @@ class Daemon:
             f"Separate the TIME part from the MESSAGE part."
         )
         try:
-            parsed = parse_json_with_llm(prompt, self.config, timeout=120)
+            parsed = parse_json_with_llm(prompt, self.config, timeout=180)
             if parsed and "iso" in parsed and "message" in parsed:
                 dt = datetime.fromisoformat(parsed["iso"])
                 parsed["fire_at"] = dt.timestamp()
@@ -1069,7 +1069,7 @@ class Daemon:
                 result = adapter.spawn(
                     prompt=fix_cmd,
                     cwd=self.active_session_cwd or self.config["directories"]["default"],
-                    timeout=120,
+                    timeout=180,
                     config=self.config,
                 )
                 if result["success"]:

@@ -102,7 +102,7 @@ def parse_schedule_via_llm(natural_text: str, env: dict, config: Optional[dict] 
     )
     try:
         cfg = config or {}
-        parsed = parse_json_with_llm(prompt, cfg, timeout=120)
+        parsed = parse_json_with_llm(prompt, cfg, timeout=180)
         if parsed and "cron" in parsed and "human" in parsed:
             return parsed
     except Exception as e:

@@ -70,7 +70,8 @@ class ClaudeAdapter(BaseAdapter):
             stdout, stderr = proc.communicate(timeout=timeout)
 
             if proc.returncode == 0:
-                summary = self._extract_response(stdout)
+                parsing_mode = cfg.get("_parsing_mode", False)
+                summary = self._extract_response(stdout, skip_strip=parsing_mode)
                 session_id = self._extract_session_id(stdout)
                 return {"success": True, "output": summary, "error": "", "session_id": session_id}
             else:
@@ -96,7 +97,7 @@ class ClaudeAdapter(BaseAdapter):
         # Claude sessions are cleared by removing session_id from state
         pass
 
-    def _extract_response(self, output: str) -> str:
+    def _extract_response(self, output: str, skip_strip: bool = False) -> str:
         try:
             data = json.loads(output)
             if isinstance(data, dict) and "result" in data:
@@ -107,6 +108,8 @@ class ClaudeAdapter(BaseAdapter):
                 text = str(data)
         except (json.JSONDecodeError, TypeError):
             text = output
+        if skip_strip:
+            return text.strip()
         return self.strip_markdown(text)
 
     @staticmethod
