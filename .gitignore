@@ -12,3 +12,4 @@ workflows.json
 workflow_runs.json
 AGENTS.md
 sessions.json
+artifacts/

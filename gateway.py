@@ -586,6 +586,71 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         upsert_workflow(WORKFLOWS_PATH, wf)
         return {"unscheduled": True}
 
+    @app.get("/api/workflows/{wf_id}/runs/{run_id}/artifacts")
+    def list_run_artifacts(wf_id: str, run_id: str):
+        return {"artifacts": wf_engine.list_artifacts(run_id)}
+
+    @app.get("/api/artifacts/{run_id}/{filename}")
+    def get_artifact(run_id: str, filename: str):
+        path = wf_engine.get_artifact_path(run_id, filename)
+        if not path:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return FileResponse(path, filename=filename)
+
+    @app.get("/api/workflows/{wf_id}/analytics")
+    def workflow_analytics(wf_id: str):
+        from collections import Counter
+        from datetime import datetime
+        runs = wf_engine.list_runs(wf_id)
+        if not runs:
+            return {"total_runs": 0, "success_rate": 0, "avg_duration_seconds": 0, "runs_by_day": [], "failure_reasons": [], "param_distribution": {}}
+
+        total = len(runs)
+        success = sum(1 for r in runs if r.status == "completed")
+        durations = [r.completed_at - r.started_at for r in runs if r.completed_at and r.started_at]
+        avg_dur = sum(durations) / len(durations) if durations else 0
+
+        last_fail = None
+        for r in sorted(runs, key=lambda x: x.started_at, reverse=True):
+            if r.status == "failed":
+                errors = [ns.error for ns in r.node_states.values() if ns.error]
+                last_fail = {"run_id": r.id, "error": errors[0] if errors else "unknown", "when": r.started_at}
+                break
+
+        by_day: dict[str, dict] = {}
+        for r in runs:
+            day = datetime.fromtimestamp(r.started_at).strftime("%Y-%m-%d")
+            if day not in by_day:
+                by_day[day] = {"date": day, "success": 0, "failed": 0}
+            if r.status == "completed":
+                by_day[day]["success"] += 1
+            elif r.status in ("failed", "aborted"):
+                by_day[day]["failed"] += 1
+
+        error_counter: Counter = Counter()
+        for r in runs:
+            if r.status == "failed":
+                for ns in r.node_states.values():
+                    if ns.error:
+                        error_counter[ns.error[:80]] += 1
+
+        param_dist: dict[str, Counter] = {}
+        for r in runs:
+            for k, v in (r.params or {}).items():
+                if k not in param_dist:
+                    param_dist[k] = Counter()
+                param_dist[k][str(v)] += 1
+
+        return {
+            "total_runs": total,
+            "success_rate": round(success / total * 100) if total else 0,
+            "avg_duration_seconds": round(avg_dur),
+            "last_failure": last_fail,
+            "runs_by_day": sorted(by_day.values(), key=lambda x: x["date"]),
+            "failure_reasons": [{"error": e, "count": c} for e, c in error_counter.most_common(10)],
+            "param_distribution": {k: dict(v) for k, v in param_dist.items()},
+        }
+
     @app.get("/api/workflow-runs")
     def list_all_workflow_runs():
         runs = wf_engine.list_runs()

@@ -96,6 +96,9 @@ export const api = {
       request<any>(`/workflows/${wfId}/schedules/${schedId}`, { method: "DELETE" }),
     resolveVariables: (body: { variables: any[]; overrides?: any }) =>
       request<{ resolved: Record<string, string> }>("/variables/resolve", { method: "POST", body: JSON.stringify(body) }),
+    analytics: (id: string) => request<any>(`/workflows/${id}/analytics`),
+    listArtifacts: (wfId: string, runId: string) =>
+      request<{ artifacts: string[] }>(`/workflows/${wfId}/runs/${runId}/artifacts`),
     refine: (id: string, body: { feedback: string; node_id?: string | null; scope?: string }) =>
       request<{ workflow: Workflow; diff: { added: string[]; removed: string[]; changed: string[] } }>(
         `/workflows/${id}/refine`,

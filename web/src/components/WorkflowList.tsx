@@ -4,7 +4,7 @@ import { api, type Workflow } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Input } from "./ui";
 import { formatRelativeTime } from "@/lib/utils";
-import { Plus, Play, Pencil, Trash2, GitBranch, Calendar, X, Sparkles, CalendarOff } from "lucide-react";
+import { Plus, Play, Pencil, Trash2, GitBranch, Calendar, X, Sparkles, CalendarOff, BarChart3 } from "lucide-react";
 import { layoutDagre } from "@/lib/dagre-layout";
 import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 
@@ -122,6 +122,9 @@ export function WorkflowList() {
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setScheduleDialogId(wf.id)} title="Add schedule">
                     <Calendar className="w-3 h-3" />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setActiveWorkflowId(wf.id); setView("workflow-analytics"); }} title="Analytics">
+                    <BarChart3 className="w-3 h-3" />
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => { setActiveWorkflowId(wf.id); setView("workflow-editor"); }}>
                     <Pencil className="w-3 h-3" />

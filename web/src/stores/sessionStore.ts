@@ -3,7 +3,7 @@ import { create } from "zustand";
 interface SessionStore {
   activeSessionId: string | null;
   setActiveSessionId: (id: string | null) => void;
-  view: "chat" | "dashboard" | "reminders" | "schedules" | "watches" | "workflows" | "workflow-editor" | "workflow-runner" | "operations" | "sessions";
+  view: "chat" | "dashboard" | "reminders" | "schedules" | "watches" | "workflows" | "workflow-editor" | "workflow-runner" | "operations" | "sessions" | "workflow-analytics";
   setView: (view: SessionStore["view"]) => void;
   activeWorkflowId: string | null;
   setActiveWorkflowId: (id: string | null) => void;

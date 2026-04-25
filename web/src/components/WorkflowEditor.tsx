@@ -279,15 +279,49 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
             </div>
             <div className="p-4 space-y-4 overflow-y-auto flex-1">
               {selectedNode.type === "prompt" && (
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground block mb-1.5">Prompt</label>
-                  <Textarea
-                    value={(selectedNode.data as any)?.prompt || ""}
-                    onChange={(e) => updateNodeData(selectedNode.id, { prompt: e.target.value })}
-                    placeholder="Enter prompt to execute..."
-                    rows={6}
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Prompt</label>
+                    <Textarea
+                      value={(selectedNode.data as any)?.prompt || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { prompt: e.target.value })}
+                      placeholder="Enter prompt to execute..."
+                      rows={6}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1.5">Save output as file (optional)</label>
+                    <Input
+                      value={(selectedNode.data as any)?.save_as || ""}
+                      onChange={(e) => updateNodeData(selectedNode.id, { save_as: e.target.value })}
+                      placeholder="report.html"
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-muted-foreground">Retries</label>
+                      <Input
+                        type="number"
+                        value={(selectedNode.data as any)?.retries || 0}
+                        onChange={(e) => updateNodeData(selectedNode.id, { retries: parseInt(e.target.value) || 0 })}
+                        className="h-7 text-xs"
+                        min={0}
+                        max={5}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-muted-foreground">Retry delay (s)</label>
+                      <Input
+                        type="number"
+                        value={(selectedNode.data as any)?.retry_delay || 30}
+                        onChange={(e) => updateNodeData(selectedNode.id, { retry_delay: parseInt(e.target.value) || 30 })}
+                        className="h-7 text-xs"
+                        min={5}
+                      />
+                    </div>
+                  </div>
+                </>
               )}
               {selectedNode.type === "branch" && (
                 <>

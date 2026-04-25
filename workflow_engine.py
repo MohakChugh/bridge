@@ -32,15 +32,19 @@ class NodeState:
     error: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
+    retry_attempt: Optional[int] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "status": self.status,
             "output": self.output,
             "error": self.error,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
+        if self.retry_attempt:
+            d["retry_attempt"] = self.retry_attempt
+        return d
 
 
 @dataclass
@@ -266,25 +270,44 @@ class WorkflowEngine:
             "run_id": wf_run.id, "node_id": node_id, "node_type": node["type"],
         })
 
-        try:
-            self._execute_node(wf_run, node, session_id)
-            if ns.status == "running":
-                ns.status = "completed"
-            ns.completed_at = time.time()
-            self._persist()
-            self._bus.publish("workflow.node.completed", {
-                "run_id": wf_run.id, "node_id": node_id, "output": ns.output,
-            })
-        except Exception as e:
-            ns.status = "failed"
-            ns.error = str(e)
-            ns.completed_at = time.time()
-            self._persist()
-            self._bus.publish("workflow.node.failed", {
-                "run_id": wf_run.id, "node_id": node_id, "error": str(e),
-            })
-            wf_run.status = "failed"
-            return
+        data = node.get("data", {})
+        max_retries = data.get("retries", 0)
+        retry_delay = data.get("retry_delay", 30)
+
+        for attempt in range(max_retries + 1):
+            try:
+                self._execute_node(wf_run, node, session_id)
+                if ns.status == "running":
+                    ns.status = "completed"
+                ns.completed_at = time.time()
+                ns.retry_attempt = attempt + 1 if attempt > 0 else None
+                self._persist()
+                self._bus.publish("workflow.node.completed", {
+                    "run_id": wf_run.id, "node_id": node_id, "output": ns.output,
+                    "attempt": attempt + 1, "max_attempts": max_retries + 1,
+                })
+                break
+            except Exception as e:
+                if attempt < max_retries:
+                    ns.output = f"Attempt {attempt + 1}/{max_retries + 1} failed: {e}. Retrying in {retry_delay}s..."
+                    self._bus.publish("workflow.node.retry", {
+                        "run_id": wf_run.id, "node_id": node_id,
+                        "attempt": attempt + 1, "max_attempts": max_retries + 1,
+                        "error": str(e),
+                    })
+                    self._persist()
+                    time.sleep(retry_delay)
+                    ns.status = "running"
+                    continue
+                ns.status = "failed"
+                ns.error = str(e)
+                ns.completed_at = time.time()
+                self._persist()
+                self._bus.publish("workflow.node.failed", {
+                    "run_id": wf_run.id, "node_id": node_id, "error": str(e),
+                })
+                wf_run.status = "failed"
+                return
 
         if self._abort_flags.get(wf_run.id):
             return
@@ -319,6 +342,10 @@ class WorkflowEngine:
                 return
             output = self._run_prompt(session_id, prompt)
             ns.output = output
+
+            save_as = data.get("save_as")
+            if save_as and output:
+                self._save_artifact(wf_run.id, save_as, output)
 
         elif node_type == "branch":
             ns.output = "(branch evaluated)"
@@ -467,6 +494,24 @@ class WorkflowEngine:
             raise Exception(result.get("error", "Prompt execution failed"))
         else:
             raise Exception("Timeout waiting for prompt execution")
+
+    def _save_artifact(self, run_id: str, filename: str, content: str) -> None:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts", run_id)
+        os.makedirs(base, exist_ok=True)
+        path = os.path.join(base, filename)
+        with open(path, "w") as f:
+            f.write(content)
+        log.info(f"Artifact saved: {path}")
+
+    def list_artifacts(self, run_id: str) -> list[str]:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts", run_id)
+        if not os.path.isdir(base):
+            return []
+        return sorted(os.listdir(base))
+
+    def get_artifact_path(self, run_id: str, filename: str) -> Optional[str]:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts", run_id, filename)
+        return path if os.path.isfile(path) else None
 
     def _conditional_branch(self, wf_run, nodes, children, parents, outgoing, session_id, branch_node):
         condition = branch_node.get("data", {}).get("condition", "")
