@@ -53,6 +53,8 @@ class WorkflowRun:
     session_id: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
+    params: dict = field(default_factory=dict)
+    schedule_label: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +66,8 @@ class WorkflowRun:
             "session_id": self.session_id,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "params": self.params,
+            "schedule_label": self.schedule_label,
         }
 
     @staticmethod
@@ -76,6 +80,8 @@ class WorkflowRun:
             session_id=d.get("session_id"),
             started_at=d.get("started_at", 0),
             completed_at=d.get("completed_at"),
+            params=d.get("params", {}),
+            schedule_label=d.get("schedule_label"),
         )
         for nid, ns_d in d.get("node_states", {}).items():
             ns = NodeState(
@@ -138,13 +144,18 @@ class WorkflowEngine:
             all_runs.sort(key=lambda r: r.get("started_at", 0), reverse=True)
             _save_runs(all_runs[:200])
 
-    def run(self, workflow: dict) -> WorkflowRun:
+    def run(self, workflow: dict, params: Optional[dict] = None, schedule_label: Optional[str] = None) -> WorkflowRun:
+        from variable_resolver import resolve_variables
+        resolved_params = resolve_variables(workflow.get("variables", []), params or {})
+
         run_id = str(uuid.uuid4())
         wf_run = WorkflowRun(
             id=run_id,
             workflow_id=workflow["id"],
             workflow_name=workflow.get("name", "Untitled"),
         )
+        wf_run.params = resolved_params
+        wf_run.schedule_label = schedule_label
         for node in workflow.get("nodes", []):
             wf_run.node_states[node["id"]] = NodeState()
 
@@ -301,7 +312,8 @@ class WorkflowEngine:
             return
 
         if node_type == "prompt":
-            prompt = data.get("prompt", "")
+            from variable_resolver import substitute_variables
+            prompt = substitute_variables(data.get("prompt", ""), wf_run.params)
             if not prompt:
                 ns.output = "(empty prompt)"
                 return
@@ -323,9 +335,10 @@ class WorkflowEngine:
             self._execute_approval(wf_run, node, ns)
 
     def _execute_notify(self, wf_run, node, ns):
+        from variable_resolver import substitute_variables
         data = node.get("data", {})
         channel = data.get("channel", "imessage")
-        prompt = data.get("message", "Summarize what happened")
+        prompt = substitute_variables(data.get("message", "Summarize what happened"), wf_run.params)
         wait_for_ack = data.get("wait_for_ack", False)
 
         # Run the message text as a prompt against the session's LLM.

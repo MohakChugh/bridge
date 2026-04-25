@@ -407,6 +407,13 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     from workflow_engine import WorkflowEngine
     wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config, daemon_ref=daemon_ref)
 
+    @app.post("/api/variables/resolve")
+    def resolve_variables_endpoint(body: dict):
+        from variable_resolver import resolve_variables
+        variables = body.get("variables", [])
+        overrides = body.get("overrides", {})
+        return {"resolved": resolve_variables(variables, overrides)}
+
     @app.post("/api/workflows/generate")
     def generate_workflow_endpoint(body: dict):
         from workflow_generator import generate_workflow
@@ -475,11 +482,13 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         return {"deleted": True}
 
     @app.post("/api/workflows/{wf_id}/run")
-    def run_workflow(wf_id: str):
+    def run_workflow(wf_id: str, body: dict = {}):
         wf = _get_wf(WORKFLOWS_PATH, wf_id)
         if not wf:
             raise HTTPException(status_code=404, detail="Workflow not found")
-        wf_run = wf_engine.run(wf)
+        params = body.get("params") if isinstance(body, dict) else None
+        schedule_label = body.get("schedule_label") if isinstance(body, dict) else None
+        wf_run = wf_engine.run(wf, params=params, schedule_label=schedule_label)
         return wf_run.to_dict()
 
     @app.get("/api/workflows/{wf_id}/runs")
@@ -503,6 +512,46 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def abort_workflow_run(wf_id: str, run_id: str):
         ok = wf_engine.abort(run_id)
         return {"aborted": ok}
+
+    @app.get("/api/workflows/{wf_id}/schedules")
+    def list_workflow_schedules(wf_id: str):
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return {"schedules": wf.get("schedules", [])}
+
+    @app.post("/api/workflows/{wf_id}/schedules")
+    def add_workflow_schedule(wf_id: str, body: dict):
+        import uuid as _uuid
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        from scheduler import next_cron_fire
+        cron = body.get("cron", "")
+        if not cron:
+            raise HTTPException(status_code=400, detail="cron is required")
+        sched = {
+            "id": str(_uuid.uuid4())[:8],
+            "label": body.get("label", "Schedule"),
+            "cron": cron,
+            "human": body.get("human", cron),
+            "params": body.get("params", {}),
+            "next_fire": next_cron_fire(cron),
+            "status": "active",
+        }
+        wf.setdefault("schedules", []).append(sched)
+        upsert_workflow(WORKFLOWS_PATH, wf)
+        return sched
+
+    @app.delete("/api/workflows/{wf_id}/schedules/{sched_id}")
+    def delete_workflow_schedule(wf_id: str, sched_id: str):
+        wf = _get_wf(WORKFLOWS_PATH, wf_id)
+        if not wf:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        scheds = wf.get("schedules", [])
+        wf["schedules"] = [s for s in scheds if s.get("id") != sched_id]
+        upsert_workflow(WORKFLOWS_PATH, wf)
+        return {"deleted": True}
 
     @app.post("/api/workflows/{wf_id}/schedule")
     def schedule_workflow(wf_id: str, body: dict):

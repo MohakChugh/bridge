@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { layoutDagre } from "@/lib/dagre-layout";
 import { GenerateWorkflowDialog } from "./GenerateWorkflowDialog";
 import { FeedbackPanel } from "./FeedbackPanel";
+import { VariablesPanel, type WorkflowVariable } from "./VariablesPanel";
 
 export function WorkflowEditor() {
   const { activeWorkflowId } = useSessionStore();
@@ -85,6 +86,8 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
   const [configOpen, setConfigOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [variablesOpen, setVariablesOpen] = useState(false);
+  const [variables, setVariables] = useState<WorkflowVariable[]>(initialWf?.variables || []);
   const [animatedNodes, setAnimatedNodes] = useState<Record<string, string>>({});
   const nodeIdCounter = useRef(10);
 
@@ -115,6 +118,7 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
         tool: wfTool,
         cwd: wfCwd,
         require_approval: nodes.some((n) => n.type === "approval"),
+        variables,
         nodes: nodes.map((n) => ({ id: n.id, type: n.type, position: n.position, data: n.data })),
         edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target, label: e.label })),
       };
@@ -187,6 +191,15 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
         >
           <LayoutGrid className="w-3 h-3 inline mr-1" />
           Layout
+        </button>
+        <button
+          onClick={() => { setVariablesOpen(!variablesOpen); setConfigOpen(false); setFeedbackOpen(false); }}
+          className={cn(
+            "px-2 py-1 rounded text-[10px] font-semibold uppercase",
+            variablesOpen ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {"{{x}}"} Vars{variables.length > 0 ? ` (${variables.length})` : ""}
         </button>
         <div className="flex-1" />
         <select value={wfTool} onChange={(e) => setWfTool(e.target.value)} className="h-8 rounded border border-border bg-transparent px-2 text-xs">
@@ -362,6 +375,17 @@ function WorkflowEditorInner({ initialWf }: { initialWf: any }) {
           </div>
         )}
       </div>
+
+      {/* Variables Panel */}
+      {variablesOpen && (
+        <div className="absolute right-0 top-0 bottom-0 z-20">
+          <VariablesPanel
+            variables={variables}
+            onChange={setVariables}
+            onClose={() => setVariablesOpen(false)}
+          />
+        </div>
+      )}
 
       {/* Feedback Panel */}
       {feedbackOpen && (

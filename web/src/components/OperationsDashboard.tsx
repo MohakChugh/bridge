@@ -140,6 +140,7 @@ export function OperationsDashboard() {
                 <thead>
                   <tr className="border-b border-border text-muted-foreground">
                     <th className="text-left py-2 font-medium">Workflow</th>
+                    <th className="text-left py-2 font-medium">Params</th>
                     <th className="text-left py-2 font-medium">Status</th>
                     <th className="text-left py-2 font-medium">Nodes</th>
                     <th className="text-left py-2 font-medium">Duration</th>
@@ -160,7 +161,19 @@ export function OperationsDashboard() {
                           setView("workflow-runner");
                         }}
                       >
-                        <td className="py-2 font-medium">{r.workflow_name}</td>
+                        <td className="py-2 font-medium">
+                          {r.workflow_name}
+                          {r.schedule_label && <span className="text-[10px] text-muted-foreground ml-1">({r.schedule_label})</span>}
+                        </td>
+                        <td className="py-2">
+                          <div className="flex gap-1 flex-wrap">
+                            {r.params && Object.entries(r.params).slice(0, 3).map(([k, v]: [string, any]) => (
+                              <span key={k} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[9px] font-medium">
+                                {String(v).length > 15 ? String(v).slice(0, 15) + "…" : String(v)}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
                         <td className="py-2"><RunBadge status={r.status} /></td>
                         <td className="py-2 text-muted-foreground">{done}/{total}</td>
                         <td className="py-2 text-muted-foreground">{dur ? `${Math.floor(dur / 60)}m ${dur % 60}s` : "—"}</td>

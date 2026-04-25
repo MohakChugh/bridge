@@ -89,6 +89,13 @@ export const api = {
     unschedule: (id: string) => request<any>(`/workflows/${id}/schedule`, { method: "DELETE" }),
     generate: (body: { text: string; tool?: string; cwd?: string }) =>
       request<any>("/workflows/generate", { method: "POST", body: JSON.stringify(body) }),
+    listSchedules: (id: string) => request<{ schedules: any[] }>(`/workflows/${id}/schedules`),
+    addSchedule: (id: string, body: any) =>
+      request<any>(`/workflows/${id}/schedules`, { method: "POST", body: JSON.stringify(body) }),
+    deleteSchedule: (wfId: string, schedId: string) =>
+      request<any>(`/workflows/${wfId}/schedules/${schedId}`, { method: "DELETE" }),
+    resolveVariables: (body: { variables: any[]; overrides?: any }) =>
+      request<{ resolved: Record<string, string> }>("/variables/resolve", { method: "POST", body: JSON.stringify(body) }),
     refine: (id: string, body: { feedback: string; node_id?: string | null; scope?: string }) =>
       request<{ workflow: Workflow; diff: { added: string[]; removed: string[]; changed: string[] } }>(
         `/workflows/${id}/refine`,

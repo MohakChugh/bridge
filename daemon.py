@@ -1347,24 +1347,37 @@ class Daemon:
                     task["next_fire"] = next_cron_fire(task.get("cron", ""))
                     save_state(STATE_PATH, self.state)
 
-            # Fire scheduled workflows
+            # Fire scheduled workflows (multi-schedule support)
             try:
                 from workflow_store import load_workflows, upsert_workflow, WORKFLOWS_PATH
                 from workflow_engine import WorkflowEngine
                 for wf in load_workflows(WORKFLOWS_PATH):
-                    sched = wf.get("schedule")
-                    if not sched or not sched.get("cron"):
-                        continue
-                    nf = sched.get("next_fire", 0)
-                    if nf > 0 and now >= nf:
-                        log.info(f"Firing scheduled workflow: {wf.get('name', '?')}")
-                        if hasattr(self, 'session_manager'):
-                            from gateway import create_app
-                            # Use the engine instance — find it via gateway or create fresh
-                            engine = WorkflowEngine(self.session_manager, lambda: self.config, daemon_ref=self)
-                            engine.run(wf)
-                        sched["next_fire"] = next_cron_fire(sched["cron"])
+                    # Support both old single schedule and new schedules[]
+                    schedules = wf.get("schedules", [])
+                    # Migrate old format
+                    old_sched = wf.get("schedule")
+                    if old_sched and not schedules:
+                        schedules = [{"id": "default", "label": "Default", "cron": old_sched.get("cron", ""), "human": old_sched.get("human", ""), "params": {}, "next_fire": old_sched.get("next_fire", 0), "status": "active"}]
+                        wf["schedules"] = schedules
+                        wf.pop("schedule", None)
                         upsert_workflow(WORKFLOWS_PATH, wf)
+
+                    for sched in schedules:
+                        if sched.get("status") != "active":
+                            continue
+                        cron = sched.get("cron", "")
+                        if not cron:
+                            continue
+                        nf = sched.get("next_fire", 0)
+                        if nf > 0 and now >= nf:
+                            label = sched.get("label", "")
+                            params = sched.get("params", {})
+                            log.info(f"Firing workflow schedule: {wf.get('name')} [{label}]")
+                            if hasattr(self, 'session_manager'):
+                                engine = WorkflowEngine(self.session_manager, lambda: self.config, daemon_ref=self)
+                                engine.run(wf, params=params, schedule_label=label)
+                            sched["next_fire"] = next_cron_fire(cron)
+                    upsert_workflow(WORKFLOWS_PATH, wf)
             except Exception as e:
                 log.warning(f"Workflow schedule check failed: {e}")
 
