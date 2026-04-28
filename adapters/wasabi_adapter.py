@@ -3,11 +3,14 @@
 from __future__ import annotations
 from typing import Optional
 import json
+import logging
 import re
 import shlex
 import subprocess
 
 from .base import BaseAdapter, get_login_shell_env
+
+log = logging.getLogger(__name__)
 
 # Noise patterns in wasabi JSON log output to skip
 SKIP_PATTERNS = [
@@ -105,11 +108,17 @@ class WasabiAdapter(BaseAdapter):
         config: Optional[dict] = None,
         history: Optional[list] = None,
     ) -> dict:
+        proc = None
         try:
             cfg = config or {}
             adapter_cfg = cfg.get("adapters", {}).get("wasabi", {})
             account = adapter_cfg.get("account", "YOUR_ACCOUNT_ID")
             model = adapter_cfg.get("model", "global.anthropic.claude-opus-4-6-v1:1m")
+
+            if account in ("YOUR_ACCOUNT_ID", "test", ""):
+                return {"success": False, "output": "", "error": f"Wasabi account not configured (got '{account}'). Set adapters.wasabi.account in config.json", "session_id": None}
+            if model in ("test-model", ""):
+                return {"success": False, "output": "", "error": f"Wasabi model not configured (got '{model}'). Set adapters.wasabi.model in config.json", "session_id": None}
 
             # Wasabi resets memory between non-interactive calls ("End workflow. Memory Reset").
             # Inject prior conversation into the prompt ourselves to maintain continuity.
@@ -154,7 +163,8 @@ class WasabiAdapter(BaseAdapter):
 
             stdout, stderr = proc.communicate(timeout=timeout)
 
-            response = self._extract_response(stdout)
+
+            response = self._extract_response(stdout, skip_markdown_strip=bool(cfg.get("_parsing_mode")))
             has_error = self._has_error(stdout)
 
             if response and not has_error:
@@ -165,14 +175,39 @@ class WasabiAdapter(BaseAdapter):
                 error_msg = self._extract_error(stdout) or "Unknown error"
                 return {"success": False, "output": "", "error": error_msg[:200], "session_id": None}
             else:
-                return {"success": False, "output": "", "error": "No response from wasabi", "session_id": None}
+                rc = proc.returncode
+                stderr_hint = stderr.strip()[-200:] if stderr.strip() else ""
+                stdout_hint = stdout.strip()[-200:] if stdout.strip() else "(empty stdout)"
+                err_msg = f"No response from wasabi (rc={rc})"
+                if stderr_hint:
+                    err_msg += f" stderr: {stderr_hint}"
+                elif not stdout.strip():
+                    err_msg += " — wasabi produced no output at all. Check account/model config."
+                else:
+                    err_msg += f" — output filtered empty. Raw tail: {stdout_hint}"
+                log.warning(f"Wasabi empty response: rc={rc}, stdout={len(stdout)}b, stderr={len(stderr)}b")
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": err_msg[:500],
+                    "session_id": "auto",
+                }
 
         except subprocess.TimeoutExpired:
             if proc:
                 proc.kill()
+                proc.wait()
             return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "wasabi CLI not found", "session_id": None}
+        except Exception as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+            return {"success": False, "output": "", "error": str(exc)[:200], "session_id": None}
 
     def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
         """Wasabi auto-resumes per directory — return single 'auto' entry."""
@@ -210,14 +245,21 @@ class WasabiAdapter(BaseAdapter):
                 return p
         return "wasabi"  # fallback to PATH lookup
 
-    def _extract_response(self, raw_output: str) -> str:
+    def _extract_response(self, raw_output: str, skip_markdown_strip: bool = False) -> str:
         """Extract actual response from wasabi's noisy output.
 
         Strategy: only collect messages that appear AFTER the "Prompt:" line.
         This skips restored conversation context entirely. Then filter out
         tool execution noise, keeping only the model's text responses.
+
+        Args:
+            raw_output: Raw stdout from wasabi process.
+            skip_markdown_strip: When True, skip strip_markdown() to preserve
+                code blocks (e.g. JSON wrapped in ```json ... ```). ANSI codes
+                are still removed. Used by parsing_mode to keep structured output.
         """
         response_lines = []
+        filtered_count = 0
         seen_prompt = False
         in_tool_block = False
 
@@ -239,44 +281,60 @@ class WasabiAdapter(BaseAdapter):
                     continue
 
                 if not seen_prompt:
+                    filtered_count += 1
                     continue
 
                 if level in ("WARN", "ERROR"):
+                    filtered_count += 1
                     continue
                 if msg_type == "loading_state":
+                    filtered_count += 1
                     continue
                 if msg.startswith("{") and "loading_state" in msg:
+                    filtered_count += 1
                     continue
                 if any(skip in msg for skip in SKIP_PATTERNS):
+                    filtered_count += 1
                     continue
                 if msg.startswith("<thinking>") or msg.endswith("</thinking>"):
+                    filtered_count += 1
                     continue
                 if not msg.strip():
+                    filtered_count += 1
                     continue
 
                 # Tool execution noise
                 if msg.startswith("────"):
                     in_tool_block = not in_tool_block
+                    filtered_count += 1
                     continue
                 if in_tool_block:
+                    filtered_count += 1
                     continue
                 if msg.startswith("Command:") and len(msg) < 200:
+                    filtered_count += 1
                     continue
                 if msg.startswith("✓ Auto-approved"):
+                    filtered_count += 1
                     continue
                 if msg.startswith("Tokens used:"):
+                    filtered_count += 1
                     continue
                 if "disable-continue disables restore" in msg:
+                    filtered_count += 1
                     continue
                 if msg.startswith("End workflow"):
+                    filtered_count += 1
                     continue
                 if "Memory Reset" in msg:
+                    filtered_count += 1
                     continue
 
                 # Tool output is dumped as raw INFO — detect by structure
                 # (ls output, file contents, etc. appear between tool calls)
                 # Only keep lines that don't look like raw command output
                 if _is_tool_output(msg):
+                    filtered_count += 1
                     continue
 
                 response_lines.append(msg)
@@ -287,7 +345,37 @@ class WasabiAdapter(BaseAdapter):
                     response_lines.append(line)
 
         text = "\n".join(response_lines)
-        return self.strip_markdown(text)
+        if skip_markdown_strip:
+            # Parsing mode: preserve code blocks (JSON etc.) but still strip ANSI
+            result = re.sub(r"\x1b\[[0-9;]*m", "", text).strip()
+        else:
+            result = self.strip_markdown(text)
+
+        # Last-resort fallback: normal extraction produced empty but stdout has
+        # content after "Prompt:". Strip obvious noise, return a best-effort
+        # cleaned version. Log memory-reset markers so the user sees WHY output
+        # was empty.
+        if not result:
+            if "Prompt:" in raw_output:
+                after_prompt = raw_output.split("Prompt:", 1)[1]
+                lines = []
+                for line in after_prompt.split("\n"):
+                    s = line.replace("\x1b[K", "").strip()
+                    if not s:
+                        continue
+                    # Skip tool blocks, timestamps, loading indicators
+                    if s.startswith(("[Tool:", "[Loading", "Loading ", "───", "▲ ", "▼ ")):
+                        continue
+                    if "Memory Reset" in s or "End workflow" in s:
+                        log.info(f"Wasabi memory reset detected: {s[:80]}")
+                        continue
+                    lines.append(s)
+                if lines:
+                    fallback = "\n".join(lines)
+                    log.info(f"Wasabi extraction used last-resort fallback ({len(fallback)} chars)")
+                    return fallback
+
+        return result
 
     @staticmethod
     def _has_error(raw_output: str) -> bool:

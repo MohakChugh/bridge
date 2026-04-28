@@ -15,9 +15,10 @@ import os
 import queue
 import threading
 import time
+import uuid as _uuid_mod
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +27,12 @@ from pydantic import BaseModel
 from event_bus import get_event_bus
 
 log = logging.getLogger("gateway")
+
+# Protects all read-modify-write operations on daemon_ref.state.
+# FastAPI runs sync endpoints in a thread pool, so concurrent mutations
+# (reminders, schedules, watches) can race.  An RLock is used so that
+# helpers called from an endpoint that already holds the lock don't deadlock.
+_STATE_LOCK = threading.RLock()
 
 WEB_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "dist")
 
@@ -90,7 +97,162 @@ class WorkflowApprovalBody(BaseModel):
     action: str  # "approve" | "abort"
 
 
-def create_app(session_manager, daemon_ref) -> FastAPI:
+class CRLoadBody(BaseModel):
+    cr_id: str
+    tool: Optional[str] = None
+
+
+class CRCommentBody(BaseModel):
+    file: str = ""
+    line: int = 0
+    content: str = ""
+    question: str = ""
+
+
+class ChatBody(BaseModel):
+    message: str
+    history: list = []
+
+
+class ChatActionBody(BaseModel):
+    action_type: str
+    params: dict = {}
+
+
+class DocCreateBody(BaseModel):
+    path: str
+    title: str
+    content: str = ""
+    tags: list = []
+    collection: str = ""
+
+class DocUpdateBody(BaseModel):
+    content: Optional[str] = None
+    title: Optional[str] = None
+    tags: Optional[list] = None
+
+class DocMoveBody(BaseModel):
+    new_parent: str
+
+class DocRenameBody(BaseModel):
+    new_name: str
+
+class DocFolderBody(BaseModel):
+    path: str
+
+class DocGenerateBody(BaseModel):
+    prompt: str
+    insert_at: Optional[int] = None
+
+class DocDiagramBody(BaseModel):
+    prompt: str
+    diagram_type: str = "mermaid"
+
+class DocEditSelectionBody(BaseModel):
+    selected_text: str
+    line_start: int = 0
+    line_end: int = 0
+    feedback: str
+
+
+class AgentTaskBody(BaseModel):
+    title: str
+    description: str
+    mode: Optional[str] = None
+
+class AgentModeBody(BaseModel):
+    mode: str
+
+class AgentMessageBody(BaseModel):
+    text: str
+
+
+def _build_refresh_workflow(docs: list[dict], daemon_ref) -> dict:
+    """Build a deterministic refresh workflow — one ingest node per document, sequential."""
+    import uuid as _uuid
+    nodes = [{"id": "start", "type": "start", "position": {"x": 250, "y": 0}, "data": {}}]
+    edges = []
+    prev_id = "start"
+    y = 150
+
+    for i, doc in enumerate(docs):
+        node_id = f"ingest-{doc['id'][:8]}"
+        nodes.append({
+            "id": node_id,
+            "type": "ingest",
+            "position": {"x": 250, "y": y},
+            "data": {
+                "source_url": doc["source_url"],
+                "source_type": doc["source_type"],
+                "collection": doc["collection"],
+                "doc_id": doc["id"],
+                "doc_name": doc["name"],
+                "auto_dedup": False,
+            },
+        })
+        edges.append({"id": f"e-{prev_id}-{node_id}", "source": prev_id, "target": node_id})
+        prev_id = node_id
+        y += 150
+
+    notify_id = "notify-complete"
+    nodes.append({
+        "id": notify_id, "type": "notify", "position": {"x": 250, "y": y},
+        "data": {"channel": "imessage", "message": f"Summarize the refresh results: how many documents were re-ingested, total chunks, tags, and graph edges created."},
+    })
+    edges.append({"id": f"e-{prev_id}-{notify_id}", "source": prev_id, "target": notify_id})
+    y += 150
+
+    nodes.append({"id": "end", "type": "end", "position": {"x": 250, "y": y}, "data": {}})
+    edges.append({"id": f"e-{notify_id}-end", "source": notify_id, "target": "end"})
+
+    is_single = len(docs) == 1
+    name = f"Refresh: {docs[0]['name']}" if is_single else f"Refresh All ({len(docs)} docs)"
+    metadata = {"_refresh": True}
+    if is_single:
+        metadata["_refresh_doc"] = docs[0]["id"]
+    else:
+        metadata["_refresh_all"] = True
+
+    return {
+        "name": name,
+        "description": f"Re-ingest {len(docs)} document(s)",
+        "tool": daemon_ref.config.get("cli_tool", "wasabi"),
+        "cwd": daemon_ref.config["directories"].get("default", "/tmp"),
+        "nodes": nodes,
+        "edges": edges,
+        "metadata": metadata,
+    }
+
+
+def _get_all_schedules(state: dict, workflows_path: str) -> list:
+    """Merge legacy scheduled_tasks + workflow schedules. Used by dashboard + operations."""
+    from workflow_store import load_workflows
+    legacy = list(state.get("scheduled_tasks", []))
+    wf_scheds = []
+    try:
+        for wf in load_workflows(workflows_path):
+            for s in (wf.get("schedules") or []):
+                wf_scheds.append({
+                    "id": f"wf-{wf['id']}-{s.get('id', '')}",
+                    "cron": s.get("cron"), "human": s.get("human"),
+                    "prompt": wf.get("name", "workflow"),
+                    "status": s.get("status", "active"),
+                    "next_fire": s.get("next_fire"), "workflow_id": wf["id"],
+                })
+            single = wf.get("schedule")
+            if single:
+                wf_scheds.append({
+                    "id": f"wf-{wf['id']}-legacy",
+                    "cron": single.get("cron"), "human": single.get("human"),
+                    "prompt": wf.get("name", "workflow"), "status": "active",
+                    "next_fire": single.get("next_fire"), "workflow_id": wf["id"],
+                })
+    except Exception:
+        pass
+    return legacy + wf_scheds
+
+
+def create_app(session_manager, daemon_ref, agent_brain=None) -> FastAPI:
     app = FastAPI(title="iMessage Bridge Gateway")
 
     app.add_middleware(
@@ -100,6 +262,54 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    from log_handler import set_correlation_id, clear_correlation_id
+
+    @app.middleware("http")
+    async def log_request_middleware(request, call_next):
+        import time as _time
+        from log_store import get_log_store
+
+        cid = str(_uuid_mod.uuid4())[:8]
+        set_correlation_id(cid)
+        start = _time.time()
+
+        # Read request body for non-WS, non-GET requests
+        req_body = ""
+        if request.method in ("POST", "PUT", "PATCH"):
+            try:
+                body_bytes = await request.body()
+                req_body = body_bytes.decode("utf-8", errors="replace")[:10240]
+                # Redact secrets
+                import re as _re
+                req_body = _re.sub(r'("(?:token|password|secret|api_key)":\s*)"[^"]*"', r'\1"[REDACTED]"', req_body)
+            except Exception:
+                pass
+
+        response = await call_next(request)
+
+        duration = (_time.time() - start) * 1000
+        response.headers["X-Correlation-ID"] = cid
+
+        # Don't log the /ws/events or /api/logs paths to avoid noise
+        path = request.url.path
+        if not path.startswith("/ws/") and not path.startswith("/api/logs"):
+            try:
+                get_log_store().write_request(
+                    timestamp=start,
+                    method=request.method,
+                    path=path,
+                    status=response.status_code,
+                    duration_ms=round(duration, 2),
+                    request_body=req_body,
+                    response_body="",  # Can't easily read streaming response body
+                    correlation_id=cid,
+                )
+            except Exception:
+                pass
+
+        clear_correlation_id()
+        return response
 
     # ---- Config / metadata ----
 
@@ -208,7 +418,9 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         if session.status == "busy":
-            raise HTTPException(status_code=409, detail="Session busy, cancel first")
+            session.queued_messages.append(body.text)
+            get_event_bus().publish("session.message.queued", {"session_id": sid, "queue_depth": len(session.queued_messages)})
+            return {"status": "queued", "queue_depth": len(session.queued_messages), "session_id": sid}
         success = session_manager.execute(sid, body.text)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to start execution")
@@ -231,8 +443,15 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     @app.get("/api/reminders")
     def list_reminders():
         reminders = daemon_ref.state.get("reminders", [])
-        for i, r in enumerate(reminders):
-            r["id"] = i  # stable index-based id
+        # Backfill stable UUIDs for any legacy reminders that lack one
+        dirty = False
+        for r in reminders:
+            if "id" not in r:
+                r["id"] = str(_uuid_mod.uuid4())
+                dirty = True
+        if dirty:
+            from config import save_state
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         return {"reminders": reminders}
 
     @app.post("/api/reminders/parse")
@@ -248,27 +467,31 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def create_reminder(body: ReminderDirectBody):
         import time as t
         reminder = {
+            "id": str(_uuid_mod.uuid4()),
             "fire_at": body.fire_at_epoch,
             "message": body.message,
             "human": body.human or "",
         }
-        daemon_ref._reminders.append(reminder)
-        daemon_ref.state.setdefault("reminders", []).append(reminder)
-        from config import save_state
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        with _STATE_LOCK:
+            daemon_ref._reminders.append(reminder)
+            daemon_ref.state.setdefault("reminders", []).append(reminder)
+            from config import save_state
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         get_event_bus().publish("reminder.created", reminder)
         return reminder
 
-    @app.delete("/api/reminders/{idx}")
-    def delete_reminder(idx: int):
-        reminders = daemon_ref.state.get("reminders", [])
-        if idx < 0 or idx >= len(reminders):
-            raise HTTPException(status_code=404, detail="Reminder not found")
-        removed = reminders.pop(idx)
-        daemon_ref._reminders = [r for r in daemon_ref._reminders if r.get("message") != removed.get("message")]
-        from config import save_state
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
-        get_event_bus().publish("reminder.deleted", {"id": idx})
+    @app.delete("/api/reminders/{reminder_id}")
+    def delete_reminder(reminder_id: str):
+        with _STATE_LOCK:
+            reminders = daemon_ref.state.get("reminders", [])
+            idx = next((i for i, r in enumerate(reminders) if r.get("id") == reminder_id), -1)
+            if idx < 0:
+                raise HTTPException(status_code=404, detail="Reminder not found")
+            reminders.pop(idx)
+            daemon_ref._reminders = [r for r in daemon_ref._reminders if r.get("id") != reminder_id]
+            from config import save_state
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        get_event_bus().publish("reminder.deleted", {"id": reminder_id})
         return {"deleted": True}
 
     # ---- Schedules ----
@@ -292,35 +515,37 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         import time as t
         from scheduler import next_cron_fire
         from config import save_state
-        tasks = daemon_ref.state.setdefault("scheduled_tasks", [])
-        task_id = max([task.get("id", 0) for task in tasks], default=0) + 1
-        task = {
-            "id": task_id,
-            "cron": body.cron,
-            "human": body.human,
-            "prompt": body.prompt,
-            "tool": body.tool or daemon_ref.config.get("cli_tool", "claude"),
-            "cwd": body.cwd or daemon_ref.config["directories"].get("default", "/tmp"),
-            "next_fire": next_cron_fire(body.cron),
-            "status": "active",
-            "created_at": t.time(),
-            "last_ran": None,
-            "last_result": None,
-        }
-        tasks.append(task)
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        with _STATE_LOCK:
+            tasks = daemon_ref.state.setdefault("scheduled_tasks", [])
+            task_id = max([task.get("id", 0) for task in tasks], default=0) + 1
+            task = {
+                "id": task_id,
+                "cron": body.cron,
+                "human": body.human,
+                "prompt": body.prompt,
+                "tool": body.tool or daemon_ref.config.get("cli_tool", "claude"),
+                "cwd": body.cwd or daemon_ref.config["directories"].get("default", "/tmp"),
+                "next_fire": next_cron_fire(body.cron),
+                "status": "active",
+                "created_at": t.time(),
+                "last_ran": None,
+                "last_result": None,
+            }
+            tasks.append(task)
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         get_event_bus().publish("schedule.created", task)
         return task
 
     @app.delete("/api/schedules/{sched_id}")
     def delete_schedule(sched_id: int):
         from config import save_state
-        tasks = daemon_ref.state.get("scheduled_tasks", [])
-        idx = next((i for i, t in enumerate(tasks) if t.get("id") == sched_id), -1)
-        if idx < 0:
-            raise HTTPException(status_code=404, detail="Schedule not found")
-        tasks.pop(idx)
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        with _STATE_LOCK:
+            tasks = daemon_ref.state.get("scheduled_tasks", [])
+            idx = next((i for i, t in enumerate(tasks) if t.get("id") == sched_id), -1)
+            if idx < 0:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            tasks.pop(idx)
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         get_event_bus().publish("schedule.deleted", {"id": sched_id})
         return {"deleted": True}
 
@@ -352,35 +577,37 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def create_watch(body: dict):
         import time as t
         from config import save_state
-        watches = daemon_ref.state.setdefault("watches", [])
-        watch_id = max([w.get("id", 0) for w in watches], default=0) + 1
-        watch = {
-            "id": watch_id,
-            "target": body.get("target", ""),
-            "check_type": body.get("check_type", "generic"),
-            "description": body.get("description", body.get("target", "watch")),
-            "interval_minutes": body.get("interval_minutes", 5),
-            "status": "active",
-            "created_at": t.time(),
-            "last_check": None,
-            "last_state": None,
-            "alert_count": 0,
-            "cooldown_until": 0,
-        }
-        watches.append(watch)
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        with _STATE_LOCK:
+            watches = daemon_ref.state.setdefault("watches", [])
+            watch_id = max([w.get("id", 0) for w in watches], default=0) + 1
+            watch = {
+                "id": watch_id,
+                "target": body.get("target", ""),
+                "type": body.get("check_type", "generic"),
+                "description": body.get("description", body.get("target", "watch")),
+                "interval_minutes": body.get("interval_minutes", 5),
+                "status": "active",
+                "created_at": t.time(),
+                "last_check": None,
+                "last_state": None,
+                "alert_count": 0,
+                "cooldown_until": 0,
+            }
+            watches.append(watch)
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         get_event_bus().publish("watch.created", watch)
         return watch
 
     @app.delete("/api/watches/{watch_id}")
     def delete_watch(watch_id: int):
         from config import save_state
-        watches = daemon_ref.state.get("watches", [])
-        idx = next((i for i, w in enumerate(watches) if w.get("id") == watch_id), -1)
-        if idx < 0:
-            raise HTTPException(status_code=404, detail="Watch not found")
-        watches.pop(idx)
-        save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+        with _STATE_LOCK:
+            watches = daemon_ref.state.get("watches", [])
+            idx = next((i for i, w in enumerate(watches) if w.get("id") == watch_id), -1)
+            if idx < 0:
+                raise HTTPException(status_code=404, detail="Watch not found")
+            watches.pop(idx)
+            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
         get_event_bus().publish("watch.deleted", {"id": watch_id})
         return {"deleted": True}
 
@@ -419,8 +646,9 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         session_snap = session_manager.snapshot()
         state = daemon_ref.state
         reminders = state.get("reminders", [])
-        schedules = state.get("scheduled_tasks", [])
         watches = state.get("watches", [])
+        all_schedules = _get_all_schedules(state, WORKFLOWS_PATH)
+        active_schedules = [s for s in all_schedules if s.get("status") == "active"]
         return {
             "sessions": session_snap,
             "reminders": {
@@ -431,8 +659,8 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
                 )[:5],
             },
             "schedules": {
-                "total": len(schedules),
-                "active": [s for s in schedules if s.get("status") == "active"][:5],
+                "total": len(all_schedules),
+                "active": active_schedules[:5],
             },
             "watches": {
                 "total": len(watches),
@@ -446,6 +674,150 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     from workflow_store import load_workflows, get_workflow as _get_wf, upsert_workflow, delete_workflow as _del_wf, WORKFLOWS_PATH
     from workflow_engine import WorkflowEngine
     wf_engine = WorkflowEngine(session_manager, lambda: daemon_ref.config, daemon_ref=daemon_ref)
+
+    # ---- Code Review ----
+
+    @app.post("/api/cr/pull")
+    def pull_cr_endpoint(body: CRLoadBody):
+        """Phase 1: Adapter checkout + static git diff. Returns files."""
+        from code_review import pull_cr
+        tool = body.tool or daemon_ref.config.get("cli_tool", "wasabi")
+        result = pull_cr(body.cr_id, tool, daemon_ref.config, session_manager)
+        return result
+
+    @app.post("/api/cr/load-workspace")
+    def load_workspace_endpoint(body: dict):
+        """Load diff from an existing workspace (user ran cr-pull manually)."""
+        from code_review import _extract_diff_static, parse_unified_diff
+        workspace = body.get("workspace", "")
+        cr_id = body.get("cr_id", "")
+        if not os.path.isdir(workspace):
+            raise HTTPException(status_code=400, detail=f"Workspace not found: {workspace}")
+        packages, diff_text = _extract_diff_static(workspace)
+        if not diff_text:
+            raise HTTPException(status_code=400, detail="No diff found in workspace")
+        files = parse_unified_diff(diff_text)
+        return {"workspace": workspace, "packages": packages, "files": files, "raw_diff": diff_text, "cr_id": cr_id}
+
+    @app.post("/api/cr/fetch-comments")
+    def fetch_cr_comments_endpoint(body: dict):
+        """Fetch existing CR comments via wasabi. Returns session_id to poll."""
+        from code_review import fetch_cr_comments
+        cr_id = body.get("cr_id", "")
+        tool = body.get("tool") or daemon_ref.config.get("cli_tool", "wasabi")
+        workspace = body.get("workspace", "")
+        packages = body.get("packages", [])
+        if not cr_id:
+            raise HTTPException(status_code=400, detail="cr_id required")
+        sid = fetch_cr_comments(cr_id, tool, workspace, packages, daemon_ref.config, session_manager)
+        return {"session_id": sid}
+
+    @app.post("/api/cr/parse-comments")
+    def parse_cr_comments_endpoint(body: dict):
+        """Parse raw CR comment output into structured format."""
+        from code_review import parse_cr_comments_structured
+        output = body.get("output", "")
+        diff_files = body.get("diff_files", [])
+        comments = parse_cr_comments_structured(output, diff_files)
+        return {"comments": comments}
+
+    @app.post("/api/cr/analyze")
+    def analyze_cr_endpoint(body: dict):
+        """Phase 2: Start parallel AI sessions for review, comments, build."""
+        from code_review import start_analysis
+        cr_id = body.get("cr_id", "")
+        workspace = body.get("workspace", "")
+        raw_diff = body.get("raw_diff", "")
+        packages = body.get("packages", [])
+        tool = body.get("tool") or daemon_ref.config.get("cli_tool", "wasabi")
+        if not workspace or not raw_diff:
+            raise HTTPException(status_code=400, detail="workspace and raw_diff required")
+        sessions = start_analysis(cr_id, workspace, raw_diff, packages, tool, daemon_ref.config, session_manager)
+        return {"sessions": sessions}
+
+    @app.post("/api/cr/comment")
+    def cr_comment_endpoint(body: dict):
+        """Each comment = own session. Returns session_id to poll."""
+        from code_review import spawn_comment_session
+        tool = body.get("tool") or daemon_ref.config.get("cli_tool", "wasabi")
+        sid = spawn_comment_session(
+            cr_id=body.get("cr_id", ""),
+            workspace=body.get("workspace", ""),
+            packages=body.get("packages", []),
+            tool=tool,
+            file_path=body.get("file", ""),
+            line_num=body.get("line", 0),
+            line_content=body.get("content", ""),
+            question=body.get("question", ""),
+            config=daemon_ref.config,
+            session_manager=session_manager,
+        )
+        return {"session_id": sid}
+
+    @app.post("/api/cr/chat")
+    def cr_chat_endpoint(body: dict):
+        """General CR question = own session."""
+        from code_review import spawn_chat_session
+        tool = body.get("tool") or daemon_ref.config.get("cli_tool", "wasabi")
+        sid = spawn_chat_session(
+            cr_id=body.get("cr_id", ""),
+            workspace=body.get("workspace", ""),
+            packages=body.get("packages", []),
+            tool=tool,
+            question=body.get("question", ""),
+            config=daemon_ref.config,
+            session_manager=session_manager,
+        )
+        return {"session_id": sid}
+
+    @app.get("/api/cr/session/{session_id}")
+    def cr_session_status(session_id: str):
+        """Poll any CR session for result."""
+        from code_review import get_session_result
+        return get_session_result(session_id, session_manager)
+
+    @app.delete("/api/cr/cleanup")
+    def cleanup_cr_endpoint(body: dict):
+        """Delete all sessions + workspace."""
+        from code_review import cleanup_cr
+        cleanup_cr(
+            workspace=body.get("workspace", ""),
+            session_ids=body.get("session_ids", []),
+            session_manager=session_manager,
+        )
+        return {"deleted": True}
+
+    # ---- RAG Chat ----
+
+    @app.post("/api/chat")
+    def chat_endpoint(body: ChatBody):
+        from rag_chat import chat
+        if not body.message.strip():
+            raise HTTPException(status_code=400, detail="message required")
+        result = chat(
+            query=body.message.strip(),
+            history=body.history[-6:],
+            config=daemon_ref.config,
+            session_manager=session_manager,
+            daemon_ref=daemon_ref,
+        )
+        get_event_bus().publish("chat.message", {
+            "query": body.message[:100],
+            "has_sources": len(result.get("sources", [])) > 0,
+        })
+        return result
+
+    @app.post("/api/chat/execute")
+    def chat_execute(body: ChatActionBody):
+        from rag_chat import execute_action
+        result = execute_action(
+            action_type=body.action_type,
+            params=body.params,
+            config=daemon_ref.config,
+            session_manager=session_manager,
+            daemon_ref=daemon_ref,
+        )
+        return result
 
     # ---- Shared Memory ----
 
@@ -550,6 +922,30 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         from shared_memory import get_shared_memory
         return {"documents": get_shared_memory().list_documents()}
 
+    @app.get("/api/knowledge/documents/{doc_id}/delete-preview")
+    def preview_document_deletion(doc_id: str):
+        """Returns what will be deleted if this document is removed."""
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        doc = mem.get_document(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunk_count = mem.db.execute("SELECT COUNT(*) FROM memories WHERE document_id = ?", (doc_id,)).fetchone()[0]
+        edge_count = mem.db.execute("SELECT COUNT(*) FROM edges WHERE source_id IN (SELECT id FROM memories WHERE document_id = ?) OR target_id IN (SELECT id FROM memories WHERE document_id = ?)", (doc_id, doc_id)).fetchone()[0]
+        collection = doc.get("collection", "")
+        coll_docs = [d for d in mem.list_documents() if d.get("collection") == collection]
+        coll_remaining_chunks = sum(d.get("chunk_count", 0) or 0 for d in coll_docs if d["id"] != doc_id)
+        return {
+            "doc_id": doc_id,
+            "name": doc.get("name"),
+            "source_url": doc.get("source_url"),
+            "chunks_to_delete": chunk_count,
+            "edges_to_delete": edge_count,
+            "collection": collection,
+            "collection_remaining_chunks": coll_remaining_chunks,
+            "collection_remaining_docs": len(coll_docs) - 1,
+        }
+
     @app.post("/api/knowledge/documents")
     def register_kb_document(body: dict):
         from shared_memory import get_shared_memory
@@ -572,14 +968,23 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
                 log.info(f"Ingested document {name}: {result}")
             except Exception as e:
                 log.warning(f"Ingestion failed for {name}: {e}")
-        threading.Thread(target=_ingest, daemon=True).start()
+        threading.Thread(target=_ingest, daemon=False).start()
         return {"id": doc_id, "name": name, "status": "ingesting"}
 
     @app.delete("/api/knowledge/documents/{doc_id}")
     def delete_kb_document(doc_id: str):
         from shared_memory import get_shared_memory
-        get_shared_memory().delete_document(doc_id)
+        ok = get_shared_memory().delete_document(doc_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Document not found")
         return {"deleted": True}
+
+    @app.delete("/api/knowledge/purge")
+    def purge_all_kb():
+        from shared_memory import get_shared_memory
+        result = get_shared_memory().purge_all()
+        log.info(f"Purged all knowledge: {result}")
+        return {"purged": True, **result}
 
     @app.post("/api/knowledge/documents/{doc_id}/refresh")
     def refresh_kb_document(doc_id: str):
@@ -596,8 +1001,23 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
                 log.info(f"Refreshed {doc['name']}: {result}")
             except Exception as e:
                 log.warning(f"Refresh failed: {e}")
-        threading.Thread(target=_refresh, daemon=True).start()
+        threading.Thread(target=_refresh, daemon=False).start()
         return {"refreshed": True, "status": "refreshing"}
+
+    @app.post("/api/knowledge/documents/{doc_id}/refresh-workflow")
+    def refresh_kb_document_workflow(doc_id: str):
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        doc = mem.get_document(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        wf = _build_refresh_workflow([doc], daemon_ref)
+        existing = next((w for w in load_workflows(WORKFLOWS_PATH) if w.get("metadata", {}).get("_refresh_doc") == doc_id), None)
+        if existing:
+            wf["id"] = existing["id"]
+        saved = upsert_workflow(WORKFLOWS_PATH, wf)
+        wf_run = wf_engine.run(saved)
+        return {"workflow_id": saved["id"], "run_id": wf_run.id, "workflow": saved}
 
     @app.post("/api/knowledge/refresh-all")
     def refresh_all_kb():
@@ -605,15 +1025,74 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         mem = get_shared_memory()
         docs = mem.list_documents()
         import threading
-        def _refresh_all():
-            from knowledge_ingestion import ingest_document
-            for doc in docs:
+        from knowledge_ingestion import ingest_document
+        for doc in docs:
+            def _refresh_one(d=doc):
                 try:
-                    ingest_document(doc["id"], daemon_ref.config)
+                    result = ingest_document(d["id"], daemon_ref.config)
+                    log.info(f"Ingested {d['name']}: {result}")
                 except Exception as e:
-                    log.warning(f"Refresh failed for {doc['name']}: {e}")
-        threading.Thread(target=_refresh_all, daemon=True).start()
-        return {"refreshing": len(docs), "status": "started"}
+                    log.warning(f"Refresh failed for {d['name']}: {e}")
+            threading.Thread(target=_refresh_one, daemon=True).start()
+        return {"refreshing": len(docs), "status": "started_parallel"}
+
+    @app.post("/api/knowledge/refresh-all-parallel")
+    def refresh_all_parallel(body: dict = {}):
+        parallelism = min(max(body.get("parallelism", 3) if body else 3, 1), 10)
+        from knowledge_ingestion import start_parallel_refresh
+        job = start_parallel_refresh(parallelism, daemon_ref.config)
+        return {"job_id": job["id"], "total": job["total"], "cleaned": job["cleaned"], "status": "running"}
+
+    @app.get("/api/knowledge/refresh-status/{job_id}")
+    def refresh_status_endpoint(job_id: str):
+        from knowledge_ingestion import get_refresh_status
+        return get_refresh_status(job_id)
+
+    @app.post("/api/knowledge/refresh-all-workflow")
+    def refresh_all_kb_workflow():
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        docs = mem.list_documents()
+        if not docs:
+            return {"workflows": [], "message": "No documents to refresh"}
+        wf = _build_refresh_workflow(docs, daemon_ref)
+        existing = next((w for w in load_workflows(WORKFLOWS_PATH) if w.get("metadata", {}).get("_refresh_all")), None)
+        if existing:
+            wf["id"] = existing["id"]
+        saved = upsert_workflow(WORKFLOWS_PATH, wf)
+        wf_run = wf_engine.run(saved)
+        return {"workflow_id": saved["id"], "run_id": wf_run.id, "workflow": saved}
+
+    @app.get("/api/knowledge/ingestion-status")
+    def get_ingestion_status():
+        """Snapshot of current ingestion activity.
+
+        Returns aggregate stats and recent events.
+        The UI should prefer the WebSocket event stream for real-time updates;
+        this endpoint is for initial page load + fallback.
+        """
+        from shared_memory import get_shared_memory
+        mem = get_shared_memory()
+        docs = mem.list_documents()
+        total_docs = len(docs)
+        total_chunks = sum(d.get("chunk_count", 0) or 0 for d in docs)
+
+        collections_map = {}
+        for d in docs:
+            coll = d.get("collection", "default")
+            if coll not in collections_map:
+                collections_map[coll] = {"name": coll, "doc_count": 0, "chunk_count": 0, "last_refreshed": 0}
+            collections_map[coll]["doc_count"] += 1
+            collections_map[coll]["chunk_count"] += d.get("chunk_count", 0) or 0
+            lr = d.get("last_refreshed") or 0
+            if lr > collections_map[coll]["last_refreshed"]:
+                collections_map[coll]["last_refreshed"] = lr
+
+        return {
+            "total_documents": total_docs,
+            "total_chunks": total_chunks,
+            "collections": list(collections_map.values()),
+        }
 
     @app.get("/api/knowledge/tags")
     def list_kb_tags():
@@ -644,6 +1123,149 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             raise HTTPException(status_code=404, detail="Edge not found")
         return {"deleted": True}
 
+    # ---- Knowledge Discovery ----
+
+    @app.post("/api/knowledge/discover")
+    def start_discovery(body: dict):
+        from knowledge_discovery import DiscoveryJob, discover_and_ingest, _persist_job
+        from shared_memory import get_shared_memory
+        import uuid as _uuid
+
+        target = body.get("target", "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="target is required")
+
+        tool = body.get("tool") or daemon_ref.config.get("parsing_tool", "wasabi")
+        scope = body.get("scope", [])
+        collection = body.get("collection") or target.lower().replace(" ", "-")
+        auto_ingest = body.get("auto_ingest", False)
+        instructions = body.get("instructions", "")
+
+        job = DiscoveryJob(
+            id=str(_uuid.uuid4())[:8],
+            target=target, tool=tool, scope=scope,
+            collection=collection, status="pending",
+            auto_ingest=auto_ingest, instructions=instructions,
+            discovered=[], new_links=[], skipped=[], ingested=[], errors=[],
+            started_at=time.time(), completed_at=None,
+            progress="Starting discovery...",
+        )
+        _persist_job(job)
+
+        def _run():
+            mem = get_shared_memory()
+            discover_and_ingest(job, daemon_ref.config, mem)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"job_id": job.id, "status": "started", "target": target}
+
+    @app.get("/api/knowledge/discover")
+    def list_discovery_jobs():
+        from knowledge_discovery import list_jobs
+        return {"jobs": list_jobs()}
+
+    @app.get("/api/knowledge/discover/{job_id}")
+    def get_discovery_job(job_id: str):
+        from knowledge_discovery import get_job
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Discovery job not found")
+        from dataclasses import asdict
+        return asdict(job)
+
+    @app.post("/api/knowledge/discover/{job_id}/ingest")
+    def ingest_from_discovery(job_id: str, body: dict):
+        from knowledge_discovery import get_job
+        from shared_memory import get_shared_memory
+        from knowledge_ingestion import ingest_document
+
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Discovery job not found")
+
+        selected_urls = set(body.get("urls", []))
+        if not selected_urls:
+            raise HTTPException(status_code=400, detail="urls list required")
+
+        mem = get_shared_memory()
+        collection = job.collection
+        ingested = []
+
+        for link in job.new_links:
+            if link["url"] in selected_urls:
+                doc_id = mem.register_document(
+                    name=link["name"],
+                    source_type=link["source_type"],
+                    source_url=link["url"],
+                    collection=collection,
+                    tags=link.get("tags", []),
+                )
+                threading.Thread(
+                    target=ingest_document, args=(doc_id, daemon_ref.config),
+                    daemon=True,
+                ).start()
+                ingested.append({"doc_id": doc_id, **link})
+
+        return {"ingested": len(ingested), "links": ingested}
+
+    @app.post("/api/knowledge/dedup-check")
+    def dedup_check(body: dict):
+        from knowledge_discovery import dedup
+        from shared_memory import get_shared_memory
+
+        urls = body.get("urls", [])
+        if not urls:
+            raise HTTPException(status_code=400, detail="urls list required")
+        links = [{"url": u, "source_type": "web", "name": u} for u in urls]
+        new_links, skipped = dedup(links, get_shared_memory())
+        return {"new": [l["url"] for l in new_links], "existing": [l["url"] for l in skipped]}
+
+    @app.post("/api/knowledge/discover-workflow")
+    def start_discovery_workflow(body: dict):
+        from knowledge_discovery import build_discovery_workflow_prompt
+        from workflow_generator import generate_workflow
+
+        target = body.get("target", "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="target is required")
+
+        tool = body.get("tool") or daemon_ref.config.get("cli_tool", "wasabi")
+        scope = body.get("scope", [])
+        collection = body.get("collection") or target.lower().replace(" ", "-")
+        instructions = body.get("instructions", "")
+
+        prompt_text = build_discovery_workflow_prompt(
+            target=target, tool=tool, scope=scope,
+            collection=collection, instructions=instructions,
+        )
+
+        wf = generate_workflow(prompt_text, tool=tool, cwd=daemon_ref.config["directories"].get("default", "/tmp"), config=daemon_ref.config)
+        if not wf:
+            raise HTTPException(status_code=500, detail="Failed to generate discovery workflow")
+
+        wf["name"] = f"Discover: {target}"
+        wf["description"] = f"AI discovery for {target}"
+        wf.setdefault("metadata", {})["_discovery"] = True
+        wf.setdefault("metadata", {})["target"] = target
+        wf.setdefault("metadata", {})["collection"] = collection
+        for i, node in enumerate(wf.get("nodes", [])):
+            node["position"] = {"x": 250, "y": i * 150}
+
+        # Upsert by target+collection — reuse existing discovery workflow
+        existing = next(
+            (w for w in load_workflows(WORKFLOWS_PATH)
+             if w.get("metadata", {}).get("_discovery") and
+                w.get("metadata", {}).get("target") == target and
+                w.get("metadata", {}).get("collection") == collection),
+            None,
+        )
+        if existing:
+            wf["id"] = existing["id"]
+        saved = upsert_workflow(WORKFLOWS_PATH, wf)
+        wf_run = wf_engine.run(saved)
+
+        return {"workflow_id": saved["id"], "run_id": wf_run.id, "workflow": saved}
+
     # ---- Personas ----
 
     @app.get("/api/personas")
@@ -668,7 +1290,10 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
     def delete_persona(name: str):
         from config import save_config
         personas = daemon_ref.config.get("personas", [])
-        daemon_ref.config["personas"] = [p for p in personas if p.get("name") != name]
+        new_personas = [p for p in personas if p.get("name") != name]
+        if len(new_personas) == len(personas):
+            raise HTTPException(status_code=404, detail="Persona not found")
+        daemon_ref.config["personas"] = new_personas
         save_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"), daemon_ref.config)
         return {"deleted": True}
 
@@ -814,7 +1439,10 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
         if not wf:
             raise HTTPException(status_code=404, detail="Workflow not found")
         scheds = wf.get("schedules", [])
-        wf["schedules"] = [s for s in scheds if s.get("id") != sched_id]
+        new_scheds = [s for s in scheds if s.get("id") != sched_id]
+        if len(new_scheds) == len(scheds):
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        wf["schedules"] = new_scheds
         upsert_workflow(WORKFLOWS_PATH, wf)
         return {"deleted": True}
 
@@ -954,14 +1582,435 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
                 "active": [w for w in state.get("watches", []) if w.get("status") == "active"],
             },
             "schedules": {
-                "total": len(state.get("scheduled_tasks", [])),
-                "active": [s for s in state.get("scheduled_tasks", []) if s.get("status") == "active"],
+                "total": len(_get_all_schedules(state, WORKFLOWS_PATH)),
+                "active": [s for s in _get_all_schedules(state, WORKFLOWS_PATH) if s.get("status") == "active"],
             },
             "reminders": {
                 "total": len(state.get("reminders", [])),
             },
             "timestamp": time.time(),
         }
+
+    # ---- Log Store API ----
+
+    @app.get("/api/logs")
+    def query_logs(
+        level: str = None, logger: str = None, since: float = None, until: float = None,
+        q: str = None, correlation_id: str = None, source: str = None,
+        limit: int = 200, offset: int = 0,
+    ):
+        from log_store import get_log_store
+        result = get_log_store().query_logs(
+            level=level, logger=logger, since=since, until=until,
+            q=q, correlation_id=correlation_id, source=source,
+            limit=limit, offset=offset,
+        )
+        return result
+
+    @app.delete("/api/logs")
+    def clear_logs():
+        from log_store import get_log_store
+        get_log_store().clear()
+        return {"cleared": True}
+
+    @app.post("/api/logs/frontend")
+    def receive_frontend_log(body: dict):
+        from log_store import get_log_store
+        import time as _time
+        get_log_store().write_log(
+            timestamp=body.get("timestamp", _time.time()),
+            level=body.get("level", "ERROR"),
+            logger=body.get("component", "frontend"),
+            message=body.get("message", ""),
+            data=json.dumps({"stack": body.get("stack", ""), "user_action": body.get("user_action", ""), "url": body.get("url", "")}),
+            correlation_id=None,
+            source="frontend",
+        )
+        return {"stored": True}
+
+    @app.get("/api/logs/requests")
+    def query_requests_log(
+        method: str = None, path: str = None,
+        status_min: int = None, status_max: int = None,
+        since: float = None, until: float = None,
+        correlation_id: str = None,
+        limit: int = 200, offset: int = 0,
+    ):
+        from log_store import get_log_store
+        result = get_log_store().query_requests(
+            method=method, path=path, status_min=status_min, status_max=status_max,
+            since=since, until=until, correlation_id=correlation_id,
+            limit=limit, offset=offset,
+        )
+        return result
+
+    @app.get("/api/logs/events")
+    def query_events_log(
+        type: str = None, since: float = None, until: float = None,
+        limit: int = 200, offset: int = 0,
+    ):
+        from log_store import get_log_store
+        result = get_log_store().query_events(
+            type_pattern=type, since=since, until=until,
+            limit=limit, offset=offset,
+        )
+        return result
+
+    @app.get("/api/logs/stats")
+    def log_stats():
+        from log_store import get_log_store
+        return get_log_store().stats()
+
+    @app.get("/api/logs/correlation/{correlation_id}")
+    def correlation_trace(correlation_id: str):
+        from log_store import get_log_store
+        store = get_log_store()
+        logs = store.query_logs(correlation_id=correlation_id, limit=500)
+        reqs = store.query_requests(correlation_id=correlation_id, limit=50)
+        evts = store.query_events(limit=0)  # Events don't have correlation_id
+        return {"logs": logs["rows"], "requests": reqs["rows"], "events": []}
+
+    # ---- Agent Brain ----
+
+    @app.post("/api/agent/tasks")
+    def create_agent_task(body: AgentTaskBody):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        task = agent_brain.create_task(body.title, body.description, body.mode)
+        return task
+
+    @app.get("/api/agent/tasks")
+    def list_agent_tasks(status: Optional[str] = None, limit: int = 20):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        return {"tasks": agent_brain.list_tasks(status=status, limit=limit)}
+
+    @app.get("/api/agent/tasks/{task_id}")
+    def get_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        task = agent_brain.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    @app.post("/api/agent/tasks/{task_id}/approve")
+    def approve_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        ok = agent_brain.approve(task_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="No pending approval for this task")
+        return {"approved": True}
+
+    @app.post("/api/agent/tasks/{task_id}/reject")
+    def reject_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        ok = agent_brain.reject(task_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="No pending approval for this task")
+        return {"rejected": True}
+
+    @app.post("/api/agent/tasks/{task_id}/cancel")
+    def cancel_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        agent_brain.cancel(task_id)
+        return {"cancelled": True}
+
+    @app.post("/api/agent/tasks/{task_id}/pause")
+    def pause_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        agent_brain.pause(task_id)
+        return {"paused": True}
+
+    @app.post("/api/agent/tasks/{task_id}/resume")
+    def resume_agent_task(task_id: str):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        agent_brain.resume(task_id)
+        return {"resumed": True}
+
+    @app.post("/api/agent/tasks/{task_id}/message")
+    def send_agent_message(task_id: str, body: AgentMessageBody):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        task = agent_brain.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if task.get("status") not in ("running", "waiting_approval", "paused"):
+            raise HTTPException(status_code=400, detail=f"Task not messageable (status: {task.get('status')})")
+        msgs = task.get("messages") or []
+        if isinstance(msgs, str):
+            import json as _j
+            try: msgs = _j.loads(msgs)
+            except: msgs = []
+        msgs.append({"role": "user", "content": body.text})
+        task["messages"] = msgs
+        agent_brain._store.save_task(task)
+        get_event_bus().publish("agent.message.received", {"task_id": task_id, "text": body.text})
+        return {"sent": True, "task_id": task_id}
+
+    @app.get("/api/agent/mode")
+    def get_agent_mode():
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        return {"mode": agent_brain.get_mode()}
+
+    @app.post("/api/agent/mode")
+    def set_agent_mode(body: AgentModeBody):
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        if body.mode not in ("safe", "yellow"):
+            raise HTTPException(status_code=400, detail="Mode must be 'safe' or 'yellow'")
+        agent_brain.set_mode(body.mode)
+        return {"mode": body.mode}
+
+    @app.get("/api/agent/status")
+    def get_agent_status():
+        if not agent_brain:
+            raise HTTPException(status_code=503, detail="Agent not enabled")
+        tasks = agent_brain.list_tasks()
+        by_status = {}
+        for t in tasks:
+            s = t["status"]
+            by_status[s] = by_status.get(s, 0) + 1
+        return {
+            "enabled": True,
+            "mode": agent_brain.get_mode(),
+            "total_tasks": len(tasks),
+            "by_status": by_status,
+        }
+
+    # ---- Document Generation Studio ----
+
+    @app.get("/api/docs")
+    def list_docs():
+        from doc_store import get_doc_store
+        return {"documents": get_doc_store().list_all()}
+
+    @app.get("/api/docs/tree")
+    def get_doc_tree():
+        from doc_store import get_doc_store
+        return {"tree": get_doc_store().get_tree()}
+
+    @app.post("/api/docs")
+    def create_doc(body: DocCreateBody):
+        from doc_store import get_doc_store
+        try:
+            doc = get_doc_store().create(body.path, body.title, body.content, body.tags, body.collection)
+        except FileExistsError:
+            raise HTTPException(status_code=409, detail="Document already exists")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return doc
+
+    @app.post("/api/docs/folder")
+    def create_doc_folder(body: DocFolderBody):
+        from doc_store import get_doc_store
+        get_doc_store().create_folder(body.path)
+        return {"created": True}
+
+    @app.post("/api/docs/{doc_id:path}/generate")
+    def generate_doc(doc_id: str, body: DocGenerateBody):
+        from doc_store import get_doc_store
+        doc = get_doc_store().read(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        generation_id = str(_uuid_mod.uuid4())[:8]
+        import threading as _thr
+        def _gen():
+            from doc_gen import generate_content
+            generate_content(doc_id, generation_id, body.prompt, doc["content"], body.insert_at, daemon_ref.config)
+        _thr.Thread(target=_gen, daemon=True).start()
+        return {"generation_id": generation_id, "doc_id": doc_id}
+
+    @app.post("/api/docs/{doc_id:path}/diagram")
+    def generate_doc_diagram(doc_id: str, body: DocDiagramBody):
+        from doc_store import get_doc_store
+        if not get_doc_store().read(doc_id):
+            raise HTTPException(status_code=404, detail="Document not found")
+        diagram_id = str(_uuid_mod.uuid4())[:8]
+        import threading as _thr
+        def _dia():
+            from doc_gen import generate_diagram
+            generate_diagram(doc_id, diagram_id, body.prompt, daemon_ref.config)
+        _thr.Thread(target=_dia, daemon=True).start()
+        return {"diagram_id": diagram_id}
+
+    @app.post("/api/docs/{doc_id:path}/edit-selection")
+    def edit_doc_selection(doc_id: str, body: DocEditSelectionBody):
+        from doc_store import get_doc_store
+        from doc_gen import edit_selection
+        store = get_doc_store()
+        doc = store.read(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404)
+        generation_id = str(_uuid_mod.uuid4())[:8]
+        edit_selection(
+            doc_id=doc_id,
+            generation_id=generation_id,
+            selected_text=body.selected_text,
+            line_start=body.line_start,
+            line_end=body.line_end,
+            feedback=body.feedback,
+            full_content=doc["content"],
+            config=daemon_ref.config,
+        )
+        return {"generation_id": generation_id, "doc_id": doc_id}
+
+    @app.post("/api/docs/{doc_id:path}/upload-image")
+    async def upload_doc_image(doc_id: str, file: UploadFile):
+        from doc_store import get_doc_store
+        store = get_doc_store()
+        doc = store.read(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404)
+
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename")
+
+        # Sanitize filename
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)
+        safe_name = f"img-{str(_uuid_mod.uuid4())[:6]}-{safe_name}"
+
+        data = await file.read()
+        if len(data) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+
+        url = store.save_asset(doc_id, safe_name, data)
+        return {"url": url, "filename": safe_name}
+
+    @app.post("/api/docs/{doc_id:path}/save-to-memory")
+    def save_doc_to_memory(doc_id: str):
+        from doc_store import get_doc_store
+        from shared_memory import get_shared_memory
+
+        store = get_doc_store()
+        doc = store.read(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404)
+
+        mem = get_shared_memory()
+
+        # Register as a knowledge base document
+        kb_doc_id = mem.register_document(
+            name=doc["title"],
+            source_type="file",
+            source_url=f"docs/{doc['path']}",
+            collection="docs",
+            tags=doc.get("frontmatter", {}).get("tags", []),
+        )
+
+        # Ingest the content
+        from knowledge_ingestion import ingest_document
+        result = ingest_document(kb_doc_id, daemon_ref.config)
+
+        get_event_bus().publish("doc.saved_to_memory", {
+            "doc_id": doc_id, "kb_doc_id": kb_doc_id,
+            "chunks": result.get("chunks", 0),
+        })
+
+        return {
+            "kb_doc_id": kb_doc_id,
+            "chunks": result.get("chunks", 0),
+            "status": "indexed",
+        }
+
+    @app.post("/api/docs/{doc_id:path}/rename")
+    def rename_doc(doc_id: str, body: DocRenameBody):
+        from doc_store import get_doc_store
+        try:
+            return get_doc_store().rename(doc_id, body.new_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+    @app.post("/api/docs/{doc_id:path}/move")
+    def move_doc(doc_id: str, body: DocMoveBody):
+        from doc_store import get_doc_store
+        try:
+            return get_doc_store().move(doc_id, body.new_parent)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+    @app.get("/api/docs/assets/{doc_id:path}/{filename}")
+    def serve_doc_asset(doc_id: str, filename: str):
+        from doc_store import get_doc_store
+        path = get_doc_store().get_asset_path(doc_id, filename)
+        if not path:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        return FileResponse(path, filename=filename)
+
+    @app.get("/api/docs/{doc_id:path}")
+    def get_doc(doc_id: str):
+        from doc_store import get_doc_store
+        doc = get_doc_store().read(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return doc
+
+    @app.patch("/api/docs/{doc_id:path}")
+    def update_doc(doc_id: str, body: DocUpdateBody):
+        from doc_store import get_doc_store
+        store = get_doc_store()
+        if not store.read(doc_id):
+            raise HTTPException(status_code=404, detail="Document not found")
+        return store.update(doc_id, content=body.content, title=body.title, tags=body.tags)
+
+    @app.delete("/api/docs/{doc_id:path}")
+    def delete_doc(doc_id: str):
+        from doc_store import get_doc_store
+        if not get_doc_store().delete(doc_id):
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"deleted": True}
+
+    # ---- Calendar ----
+
+    @app.get("/api/calendar")
+    def list_calendar_events(start: str = "", end: str = ""):
+        import datetime as _dt
+        from workflow_store import WORKFLOWS_PATH as _WF_PATH
+        events = []
+        for sched in _get_all_schedules(daemon_ref.state, _WF_PATH):
+            nf = sched.get("next_fire")
+            if nf:
+                dt = _dt.datetime.fromtimestamp(nf)
+                date_str = dt.strftime("%Y-%m-%d")
+                if start and date_str < start:
+                    continue
+                if end and date_str > end:
+                    continue
+                events.append({
+                    "id": sched.get("id", ""),
+                    "title": sched.get("prompt", "Schedule"),
+                    "start": date_str,
+                    "event_type": "schedule",
+                    "confidence": 1.0,
+                    "source_message_id": "",
+                    "subject": sched.get("human", ""),
+                    "from_addr": "bridge",
+                })
+        return events
+
+    @app.get("/api/calendar/export.ics")
+    def export_calendar_ics(start: str = "", end: str = ""):
+        from fastapi.responses import Response
+        events = list_calendar_events(start=start, end=end)
+        lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Bridge//EN"]
+        for ev in events:
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{ev['id']}@bridge",
+                f"DTSTART;VALUE=DATE:{ev['start'].replace('-', '')}",
+                f"SUMMARY:{ev['title']}",
+                f"DESCRIPTION:{ev['subject']}",
+                "END:VEVENT",
+            ]
+        lines.append("END:VCALENDAR")
+        return Response(content="\r\n".join(lines), media_type="text/calendar")
 
     # ---- WebSocket ----
 
@@ -988,6 +2037,7 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
             while True:
                 try:
                     event = await loop.run_in_executor(None, sub.get, True, 30)
+                    bus._touch(sub)
                     await websocket.send_text(json.dumps(event))
                 except queue.Empty:
                     try:
@@ -1039,25 +2089,27 @@ def create_app(session_manager, daemon_ref) -> FastAPI:
 
 def _update_schedule_status(daemon_ref, sched_id: int, status: str):
     from config import save_state
-    tasks = daemon_ref.state.get("scheduled_tasks", [])
-    for task in tasks:
-        if task.get("id") == sched_id:
-            task["status"] = status
-            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
-            get_event_bus().publish("schedule.updated", task)
-            return task
+    with _STATE_LOCK:
+        tasks = daemon_ref.state.get("scheduled_tasks", [])
+        for task in tasks:
+            if task.get("id") == sched_id:
+                task["status"] = status
+                save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+                get_event_bus().publish("schedule.updated", task)
+                return task
     raise HTTPException(status_code=404, detail="Schedule not found")
 
 
 def _update_watch_status(daemon_ref, watch_id: int, status: str):
     from config import save_state
-    watches = daemon_ref.state.get("watches", [])
-    for watch in watches:
-        if watch.get("id") == watch_id:
-            watch["status"] = status
-            save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
-            get_event_bus().publish("watch.updated", watch)
-            return watch
+    with _STATE_LOCK:
+        watches = daemon_ref.state.get("watches", [])
+        for watch in watches:
+            if watch.get("id") == watch_id:
+                watch["status"] = status
+                save_state(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"), daemon_ref.state)
+                get_event_bus().publish("watch.updated", watch)
+                return watch
     raise HTTPException(status_code=404, detail="Watch not found")
 
 
@@ -1083,11 +2135,11 @@ pnpm build</code></pre>
 """
 
 
-def start_gateway(session_manager, daemon_ref, port: int = 7777) -> threading.Thread:
+def start_gateway(session_manager, daemon_ref, port: int = 7777, agent_brain=None) -> threading.Thread:
     """Start uvicorn in a daemon thread. Non-blocking."""
     import uvicorn
 
-    app = create_app(session_manager, daemon_ref)
+    app = create_app(session_manager, daemon_ref, agent_brain=agent_brain)
 
     def run():
         config = uvicorn.Config(

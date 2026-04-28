@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid as _uuid_mod
 
 # Add project directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +49,10 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("imessage-bridge")
+from log_store import get_log_store
+from log_handler import SQLiteLogHandler
+get_log_store()
+logging.getLogger().addHandler(SQLiteLogHandler())
 
 HELP_TEXT = (
     "SESSION\n"
@@ -240,6 +245,27 @@ class Daemon:
 
         # Gateway (REST + WebSocket) — optional
         gateway_cfg = self.config.get("gateway", {})
+        # Agent Brain
+        self.agent_brain = None
+        if self.config.get("agent", {}).get("enabled", True):
+            try:
+                from agent_brain import init_agent_brain
+                self.agent_brain = init_agent_brain(self.session_manager, lambda: self.config, self)
+                log.info("Agent Brain initialized")
+            except Exception as e:
+                log.error(f"Failed to init Agent Brain: {e}")
+
+        # Continuous Ingestor
+        self._ingestor = None
+        if self.config.get("agent", {}).get("auto_ingest", True):
+            try:
+                from agent_ingestor import ContinuousIngestor
+                self._ingestor = ContinuousIngestor(lambda: self.config)
+                self._ingestor.start()
+                log.info("ContinuousIngestor started")
+            except Exception as e:
+                log.error(f"Failed to start ingestor: {e}")
+
         if gateway_cfg.get("enabled", True):
             try:
                 from gateway import start_gateway
@@ -248,6 +274,7 @@ class Daemon:
                     session_manager=self.session_manager,
                     daemon_ref=self,
                     port=port,
+                    agent_brain=self.agent_brain,
                 )
                 log.info(f"Gateway started on http://127.0.0.1:{port}")
             except Exception as e:
@@ -275,6 +302,33 @@ class Daemon:
         threading.Thread(target=self._watch_loop, daemon=True).start()
 
         log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
+
+        # Recovery: re-ingest documents that were interrupted (chunk_count=0, never refreshed)
+        self._recover_stuck_ingestions()
+
+    def _recover_stuck_ingestions(self):
+        try:
+            from shared_memory import get_shared_memory
+            mem = get_shared_memory()
+            stuck = mem.db.execute(
+                "SELECT id, name, source_url FROM documents WHERE chunk_count = 0 AND last_refreshed IS NULL"
+            ).fetchall()
+            if not stuck:
+                return
+            log.info(f"Found {len(stuck)} stuck document(s) from interrupted ingestion, re-queuing...")
+            for doc in stuck:
+                doc_id, name = doc["id"], doc["name"]
+                log.info(f"  Re-ingesting: {name} ({doc_id})")
+                def _reingest(did=doc_id, dname=name):
+                    try:
+                        from knowledge_ingestion import ingest_document
+                        result = ingest_document(did, self.config)
+                        log.info(f"Recovery ingestion completed for {dname}: {result}")
+                    except Exception as e:
+                        log.error(f"Recovery ingestion failed for {dname}: {e}")
+                threading.Thread(target=_reingest, daemon=False).start()
+        except Exception as e:
+            log.warning(f"Stuck ingestion recovery check failed: {e}")
 
     def _try_notify_fda_error(self):
         try:
@@ -787,7 +841,11 @@ class Daemon:
                 idx = int(val) - 1
                 if 0 <= idx < len(reminders):
                     removed = reminders.pop(idx)
-                    self._reminders = [r for r in self._reminders if r.get("message") != removed.get("message")]
+                    rid = removed.get("id")
+                    if rid:
+                        self._reminders = [r for r in self._reminders if r.get("id") != rid]
+                    else:
+                        self._reminders = [r for r in self._reminders if r is not removed]
                     save_state(STATE_PATH, self.state)
                     self._reply(f"Reminder #{idx+1} cancelled.")
                 else:
@@ -802,7 +860,7 @@ class Daemon:
             seconds = self._parse_time(parts[0])
             if seconds is not None:
                 fire_at = time.time() + seconds
-                reminder = {"fire_at": fire_at, "message": parts[1]}
+                reminder = {"id": str(_uuid_mod.uuid4()), "fire_at": fire_at, "message": parts[1]}
                 self._reminders.append(reminder)
                 self.state.setdefault("reminders", []).append(reminder)
                 save_state(STATE_PATH, self.state)
@@ -854,7 +912,7 @@ class Daemon:
             remind = self._pending_remind
             if not remind:
                 return
-            reminder = {"fire_at": remind["fire_at"], "message": remind["message"]}
+            reminder = {"id": str(_uuid_mod.uuid4()), "fire_at": remind["fire_at"], "message": remind["message"]}
             self._reminders.append(reminder)
             self.state.setdefault("reminders", []).append(reminder)
             save_state(STATE_PATH, self.state)
@@ -1478,8 +1536,12 @@ class Daemon:
                 if r in self._reminders:
                     self._reminders.remove(r)
                 # Remove from persisted state too
+                rid = r.get("id")
                 persisted = self.state.get("reminders", [])
-                self.state["reminders"] = [p for p in persisted if p.get("fire_at") != r.get("fire_at") or p.get("message") != r.get("message")]
+                if rid:
+                    self.state["reminders"] = [p for p in persisted if p.get("id") != rid]
+                else:
+                    self.state["reminders"] = [p for p in persisted if p.get("fire_at") != r.get("fire_at") or p.get("message") != r.get("message")]
                 save_state(STATE_PATH, self.state)
             time.sleep(5)
 
@@ -1850,6 +1912,11 @@ class Daemon:
 
     def stop(self) -> None:
         self.running = False
+        try:
+            from log_store import get_log_store
+            get_log_store().stop()
+        except Exception:
+            pass
         if hasattr(self, 'session_manager'):
             try:
                 self.session_manager.persist_all()
@@ -1858,6 +1925,16 @@ class Daemon:
         if self._slack_channel:
             try:
                 self._slack_channel.stop()
+            except Exception:
+                pass
+        if self.agent_brain:
+            try:
+                self.agent_brain.shutdown()
+            except Exception:
+                pass
+        if self._ingestor:
+            try:
+                self._ingestor.stop()
             except Exception:
                 pass
 

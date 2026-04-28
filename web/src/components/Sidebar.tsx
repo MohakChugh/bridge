@@ -1,13 +1,19 @@
 import { useSessionStore } from "@/stores/sessionStore";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, MessageSquare, Bell, Calendar, Eye, Zap, GitBranch, Activity, Settings, Brain } from "lucide-react";
+import { LayoutDashboard, MessageSquare, Bell, Calendar, Eye, Zap, GitBranch, Activity, Settings, Brain, ScrollText, GitPullRequest, FileEdit, Bot, ListTodo } from "lucide-react";
 
 const items = [
   { view: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
   { view: "operations" as const, label: "Operations", icon: Activity },
+  { view: "calendar" as const, label: "Calendar", icon: Calendar },
+  { view: "logs" as const, label: "Logs", icon: ScrollText },
   { view: "chat" as const, label: "Chat", icon: MessageSquare },
   { view: "workflows" as const, label: "Workflows", icon: GitBranch },
+  { view: "agent" as const, label: "Agent", icon: Bot },
+  { view: "code-review" as const, label: "Code Review", icon: GitPullRequest },
+  { view: "docs" as const, label: "Docs", icon: FileEdit },
   { view: "memory" as const, label: "Memory", icon: Brain },
+  { view: "todos" as const, label: "Todos", icon: ListTodo },
   { view: "reminders" as const, label: "Reminders", icon: Bell },
   { view: "schedules" as const, label: "Schedules", icon: Calendar },
   { view: "watches" as const, label: "Watches", icon: Eye },

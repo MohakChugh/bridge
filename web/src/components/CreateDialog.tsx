@@ -18,6 +18,9 @@ export function ReminderDialog({ open, onClose }: BaseProps) {
   const parseMut = useMutation({
     mutationFn: (t: string) => api.reminders.parse(t),
     onSuccess: (data) => setParsed(data),
+    onError: (_err: Error) => {
+      // error stays visible via parseMut.isError — no need for state
+    },
   });
 
   const createMut = useMutation({
@@ -63,7 +66,7 @@ export function ReminderDialog({ open, onClose }: BaseProps) {
             </Button>
           </div>
           {parseMut.isError && (
-            <div className="text-xs text-destructive mt-2">Could not parse — try different phrasing</div>
+            <p className="text-xs text-destructive mt-1">{(parseMut.error as Error).message}</p>
           )}
         </>
       ) : (
@@ -103,6 +106,9 @@ export function ScheduleDialog({ open, onClose }: BaseProps) {
   const parseMut = useMutation({
     mutationFn: (t: string) => api.schedules.parse(t),
     onSuccess: (data) => setParsed(data),
+    onError: (_err: Error) => {
+      // error stays visible via parseMut.isError — no need for state
+    },
   });
 
   const createMut = useMutation({
@@ -157,7 +163,9 @@ export function ScheduleDialog({ open, onClose }: BaseProps) {
               {parseMut.isPending ? "Parsing…" : "Parse"}
             </Button>
           </div>
-          {parseMut.isError && <div className="text-xs text-destructive mt-2">Parse failed</div>}
+          {parseMut.isError && (
+            <p className="text-xs text-destructive mt-1">{(parseMut.error as Error).message}</p>
+          )}
         </>
       ) : (
         <>
@@ -194,6 +202,9 @@ export function WatchDialog({ open, onClose }: BaseProps) {
   const parseMut = useMutation({
     mutationFn: (t: string) => api.watches.parse(t),
     onSuccess: (data) => setParsed(data),
+    onError: (_err: Error) => {
+      // error stays visible via parseMut.isError — no need for state
+    },
   });
 
   const createMut = useMutation({
@@ -233,7 +244,9 @@ export function WatchDialog({ open, onClose }: BaseProps) {
               {parseMut.isPending ? "Parsing…" : "Parse"}
             </Button>
           </div>
-          {parseMut.isError && <div className="text-xs text-destructive mt-2">Parse failed</div>}
+          {parseMut.isError && (
+            <p className="text-xs text-destructive mt-1">{(parseMut.error as Error).message}</p>
+          )}
         </>
       ) : (
         <>

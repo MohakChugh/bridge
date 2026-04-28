@@ -66,3 +66,250 @@
 @keyframes nodeShrinkOut {
   to { transform: scale(0.1); opacity: 0; }
 }
+
+/* Chat markdown rendering */
+.chat-markdown {
+  @apply text-sm leading-relaxed;
+}
+.chat-markdown p {
+  @apply mb-2 last:mb-0;
+}
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  @apply font-semibold mt-3 mb-1.5;
+}
+.chat-markdown h1 { @apply text-base; }
+.chat-markdown h2 { @apply text-sm; }
+.chat-markdown h3 { @apply text-sm opacity-90; }
+.chat-markdown ul, .chat-markdown ol {
+  @apply pl-4 mb-2 space-y-0.5;
+}
+.chat-markdown ul { list-style-type: disc; }
+.chat-markdown ol { list-style-type: decimal; }
+.chat-markdown li { @apply text-sm; }
+.chat-markdown li > ul, .chat-markdown li > ol {
+  @apply mt-0.5 mb-0;
+}
+.chat-markdown code {
+  @apply bg-background/50 text-primary px-1 py-0.5 rounded text-xs font-mono;
+}
+.chat-markdown pre {
+  @apply bg-background/60 rounded-lg p-3 my-2 overflow-x-auto;
+}
+.chat-markdown pre code {
+  @apply bg-transparent p-0 text-foreground;
+}
+.chat-markdown blockquote {
+  @apply border-l-2 border-primary/40 pl-3 my-2 opacity-80 italic;
+}
+.chat-markdown a {
+  @apply text-primary underline underline-offset-2 hover:text-primary/80 transition-colors;
+}
+.chat-markdown table {
+  @apply w-full my-2 text-xs;
+}
+.chat-markdown th {
+  @apply text-left font-semibold pb-1 border-b border-border/50 px-2;
+}
+.chat-markdown td {
+  @apply py-1 px-2 border-b border-border/20;
+}
+.chat-markdown hr {
+  @apply my-3 border-border/30;
+}
+.chat-markdown strong { @apply font-semibold; }
+.chat-markdown em { @apply italic; }
+
+/* Document editor markdown rendering — full-size headings */
+.doc-markdown {
+  @apply text-base leading-relaxed;
+}
+.doc-markdown p {
+  @apply mb-4 last:mb-0 text-base;
+}
+.doc-markdown h1 {
+  @apply text-3xl font-bold mt-8 mb-4 pb-3 border-b border-border/30;
+}
+.doc-markdown h2 {
+  @apply text-2xl font-semibold mt-6 mb-3 pb-2 border-b border-border/20;
+}
+.doc-markdown h3 {
+  @apply text-xl font-semibold mt-5 mb-2;
+}
+.doc-markdown h4 {
+  @apply text-lg font-semibold mt-4 mb-2;
+}
+.doc-markdown ul, .doc-markdown ol {
+  @apply pl-6 mb-3 space-y-1;
+}
+.doc-markdown ul { list-style-type: disc; }
+.doc-markdown ol { list-style-type: decimal; }
+.doc-markdown li { @apply text-sm; }
+.doc-markdown li > ul, .doc-markdown li > ol {
+  @apply mt-1 mb-0;
+}
+.doc-markdown code {
+  @apply bg-primary/10 text-primary px-1.5 py-0.5 rounded text-xs font-mono;
+}
+.doc-markdown pre {
+  @apply bg-background/60 rounded-lg p-4 my-3 overflow-x-auto;
+}
+.doc-markdown pre code {
+  @apply bg-transparent p-0 text-foreground;
+}
+.doc-markdown blockquote {
+  @apply border-l-2 border-primary/40 pl-4 my-3 italic text-muted-foreground;
+}
+.doc-markdown a {
+  @apply text-primary underline underline-offset-2 hover:text-primary/80 transition-colors;
+}
+.doc-markdown table {
+  @apply w-full my-3 text-sm;
+}
+.doc-markdown th {
+  @apply text-left font-semibold pb-2 border-b border-border px-3;
+}
+.doc-markdown td {
+  @apply py-2 px-3 border-b border-border/30;
+}
+.doc-markdown hr {
+  @apply my-4 border-border/40;
+}
+.doc-markdown strong { @apply font-semibold; }
+.doc-markdown em { @apply italic; }
+.doc-markdown img {
+  @apply max-w-full rounded-lg my-3;
+}
+
+/* Tiptap editor — Typora-like WYSIWYG */
+.tiptap {
+  outline: none;
+}
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: hsl(240 5% 40%);
+  pointer-events: none;
+  height: 0;
+}
+.tiptap .is-empty::before {
+  color: hsl(240 5% 40%);
+}
+.doc-markdown ul[data-type="taskList"] {
+  list-style-type: none;
+  padding-left: 0;
+}
+.doc-markdown ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.doc-markdown ul[data-type="taskList"] li > label {
+  margin-top: 0.15rem;
+}
+.doc-markdown ul[data-type="taskList"] li > label input[type="checkbox"] {
+  accent-color: hsl(263 80% 65%);
+}
+.doc-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75rem 0;
+}
+.doc-markdown th, .doc-markdown td {
+  border: 1px solid hsl(240 5% 20%);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.doc-markdown th {
+  background: hsl(240 5% 12%);
+  font-weight: 600;
+}
+
+/* Code blocks — line numbers (Typora-style) */
+.doc-markdown pre {
+  position: relative;
+  counter-reset: line;
+}
+.doc-markdown pre code {
+  counter-reset: line;
+}
+.doc-markdown pre code .hljs-ln-line {
+  counter-increment: line;
+}
+/* Line numbers via CSS counter on each line of code */
+.doc-markdown pre code {
+  display: block;
+  padding-left: 3.5rem !important;
+}
+.doc-markdown pre code::before {
+  content: none;
+}
+/* Tiptap code block line numbers */
+.tiptap pre {
+  position: relative;
+  border-radius: 0.5rem;
+  background: hsl(240 10% 6%);
+  padding: 1rem;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+.tiptap pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  display: block;
+  white-space: pre;
+}
+/* Line number gutter */
+.tiptap pre {
+  counter-reset: tiptap-line;
+}
+.tiptap pre code .hljs-ln {
+  counter-increment: tiptap-line;
+}
+
+/* Mermaid preview below code blocks */
+.mermaid-preview-container {
+  margin: 0.5rem 0 1rem;
+  padding: 1rem;
+  border: 1px solid hsl(240 5% 20%);
+  border-radius: 0.5rem;
+  background: hsl(240 10% 6%);
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+}
+.mermaid-preview-container svg {
+  max-width: 100%;
+}
+.mermaid-preview-container.mermaid-error {
+  color: hsl(0 80% 60%);
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  padding: 0.75rem;
+}
+
+/* highlight.js — GitHub Dark adapted */
+.hljs-keyword { color: #ff7b72; }
+.hljs-string, .hljs-doctag { color: #a5d6ff; }
+.hljs-number, .hljs-literal { color: #79c0ff; }
+.hljs-built_in { color: #ffa657; }
+.hljs-type, .hljs-title.class_ { color: #ffa657; }
+.hljs-title.function_ { color: #d2a8ff; }
+.hljs-attr, .hljs-attribute { color: #79c0ff; }
+.hljs-comment { color: #8b949e; font-style: italic; }
+.hljs-meta { color: #79c0ff; }
+.hljs-tag { color: #7ee787; }
+.hljs-name { color: #7ee787; }
+.hljs-params { color: #c9d1d9; }
+.hljs-variable { color: #ffa657; }
+.hljs-regexp { color: #a5d6ff; }
+.hljs-operator { color: #ff7b72; }
+.hljs-punctuation { color: #c9d1d9; }
+.hljs-property { color: #79c0ff; }
+.hljs-template-variable { color: #ffa657; }
+.hljs-selector-class { color: #d2a8ff; }
+.hljs-selector-id { color: #ffa657; }
+.hljs-addition { color: #aff5b4; background: rgba(46,160,67,0.15); }
+.hljs-deletion { color: #ffdcd7; background: rgba(248,81,73,0.15); }

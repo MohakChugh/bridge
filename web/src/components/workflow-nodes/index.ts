@@ -8,6 +8,8 @@ import { ApprovalNode } from "./ApprovalNode";
 import { NotifyNode } from "./NotifyNode";
 import { EndNode } from "./EndNode";
 import { MemorySearchNode } from "./MemorySearchNode";
+import { IngestNode } from "./IngestNode";
+import { DiscoverNode } from "./DiscoverNode";
 
 export const nodeTypes: NodeTypes = {
   start: StartNode,
@@ -18,6 +20,8 @@ export const nodeTypes: NodeTypes = {
   approval: ApprovalNode,
   notify: NotifyNode,
   "memory-search": MemorySearchNode,
+  ingest: IngestNode,
+  discover: DiscoverNode,
   end: EndNode,
 };
 

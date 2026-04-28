@@ -14,6 +14,9 @@ const queryClient = new QueryClient({
   },
 });
 
+import { initErrorReporter } from "@/api/errorReporter";
+initErrorReporter();
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>

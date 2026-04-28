@@ -77,8 +77,10 @@ class KiroAdapter(BaseAdapter):
         process_holder: object = None,
         config: Optional[dict] = None,
     ) -> dict:
+        proc = None
         try:
             cfg = config or {}
+            parsing_mode = cfg.get("_parsing_mode", False)
             adapter_cfg = cfg.get("adapters", {}).get("kiro", {})
             model = adapter_cfg.get("model", "claude-opus-4.7")
 
@@ -113,7 +115,7 @@ class KiroAdapter(BaseAdapter):
             stdout, stderr = proc.communicate(timeout=timeout)
 
             if proc.returncode == 0:
-                response = self._extract_response(stdout)
+                response = self._extract_response(stdout, preserve_markdown=parsing_mode)
                 session_id = self._extract_session_id(stderr, cwd)
                 if response:
                     return {"success": True, "output": response, "error": "", "session_id": session_id}
@@ -126,9 +128,18 @@ class KiroAdapter(BaseAdapter):
         except subprocess.TimeoutExpired:
             if proc:
                 proc.kill()
+                proc.wait()
             return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "kiro-cli not found", "session_id": None}
+        except Exception as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+            return {"success": False, "output": "", "error": str(exc)[:200], "session_id": None}
 
     def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
         """List Kiro sessions for a directory."""
@@ -175,7 +186,7 @@ class KiroAdapter(BaseAdapter):
         except Exception:
             pass
 
-    def _extract_response(self, stdout: str) -> str:
+    def _extract_response(self, stdout: str, preserve_markdown: bool = False) -> str:
         """Extract response from stdout. Kiro puts response on stdout, noise on stderr."""
         # Strip ANSI escape codes
         text = re.sub(r'\x1b\[[0-9;]*[mGKHJ]', '', stdout)
@@ -189,15 +200,20 @@ class KiroAdapter(BaseAdapter):
         # Remove tool execution artifacts
         lines = []
         for line in text.splitlines():
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if stripped.startswith('Creating:') or stripped.startswith('- Completed in'):
                 continue
-            if line.startswith('Creating:') or line.startswith('- Completed in'):
+            if 'hooks finished' in stripped:
                 continue
-            if 'hooks finished' in line:
-                continue
-            lines.append(line)
+            if preserve_markdown:
+                lines.append(line.rstrip())
+            else:
+                if not stripped:
+                    continue
+                lines.append(stripped)
         result = '\n'.join(lines).strip()
+        if preserve_markdown:
+            return result
         return self.strip_markdown(result)
 
     @staticmethod

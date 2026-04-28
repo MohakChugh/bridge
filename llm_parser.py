@@ -54,6 +54,34 @@ def parse_with_llm(prompt: str, config: dict, timeout: int = 180) -> Optional[st
         return None
 
 
+def parse_with_wasabi(prompt: str, config: dict, timeout: int = 300) -> Optional[str]:
+    """Send prompt specifically through wasabi adapter (has MCP web tools)."""
+    from adapters import get_adapter
+
+    try:
+        adapter = get_adapter("wasabi")
+    except KeyError:
+        log.warning("Wasabi adapter not registered, falling back to default")
+        return parse_with_llm(prompt, config, timeout=timeout)
+
+    try:
+        parse_config = dict(config)
+        parse_config["_parsing_mode"] = True
+        result = adapter.spawn(
+            prompt=prompt,
+            cwd="/tmp",
+            timeout=timeout,
+            config=parse_config,
+        )
+        if result.get("success") and result.get("output"):
+            return result["output"]
+        log.warning(f"Wasabi parse failed: {result.get('error', 'no output')}")
+        return None
+    except Exception as e:
+        log.warning(f"Wasabi parse error: {e}")
+        return None
+
+
 def parse_json_with_llm(prompt: str, config: dict, timeout: int = 180) -> Optional[dict]:
     """Send prompt and extract JSON from response.
 
@@ -73,15 +101,16 @@ def parse_json_with_llm(prompt: str, config: dict, timeout: int = 180) -> Option
     if result:
         return result
 
-    # Retry with stronger instruction
-    log.info("JSON extraction failed on first attempt, retrying with stronger prompt")
+    # Retry with stronger instruction — use half timeout for faster failure
+    retry_timeout = max(30, timeout // 2)
+    log.info(f"JSON extraction failed on first attempt, retrying with stronger prompt (timeout={retry_timeout}s)")
     retry_prompt = (
         "Your previous response was not valid JSON. "
         "Reply with ONLY a JSON object. No text, no explanation, no code blocks. "
         "Just the raw JSON starting with { and ending with }.\n\n"
         + prompt
     )
-    raw2 = parse_with_llm(retry_prompt, config, timeout=timeout)
+    raw2 = parse_with_llm(retry_prompt, config, timeout=retry_timeout)
     if raw2:
         return extract_json(raw2)
     return None

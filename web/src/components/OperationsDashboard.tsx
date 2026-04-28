@@ -21,18 +21,9 @@ import {
 export function OperationsDashboard() {
   const { setView, setActiveWorkflowId, setActiveRunId, setActiveSessionId } = useSessionStore();
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["operations"],
-    queryFn: () => api.activity().then(() => null).catch(() => null),
-    enabled: false,
-  });
-
   const { data: ops } = useQuery({
-    queryKey: ["operations-data"],
-    queryFn: async () => {
-      const res = await fetch("/api/operations");
-      return res.json();
-    },
+    queryKey: ["operations"],
+    queryFn: () => api.operations(),
     refetchInterval: 5000,
   });
 

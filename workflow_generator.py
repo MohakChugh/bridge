@@ -22,7 +22,7 @@ User feedback: {feedback}
 
 Scope: {scope_instruction}
 
-Available node types: start, prompt, branch, merge, delay, approval, notify, end.
+Available node types: start, prompt, branch, merge, delay, approval, notify, discover, ingest, memory-search, end.
 
 Rules:
 1. Keep the same "start" and "end" nodes
@@ -112,6 +112,45 @@ def _normalize_workflow(wf: dict) -> dict:
     # Remove edges with empty source/target
     wf["edges"] = [e for e in wf["edges"] if e.get("source") and e.get("target")]
 
+    # Validate edges reference existing node IDs
+    node_ids = {n["id"] for n in wf.get("nodes", [])}
+    valid_edges = []
+    for edge in wf["edges"]:
+        if edge["source"] not in node_ids:
+            log.warning(f"Dropping edge {edge.get('id', '?')}: source '{edge['source']}' not in nodes")
+        elif edge["target"] not in node_ids:
+            log.warning(f"Dropping edge {edge.get('id', '?')}: target '{edge['target']}' not in nodes")
+        else:
+            valid_edges.append(edge)
+    wf["edges"] = valid_edges
+
+    # Simple cycle detection via DFS from start node
+    adjacency: dict[str, list[str]] = {nid: [] for nid in node_ids}
+    for edge in wf["edges"]:
+        adjacency[edge["source"]].append(edge["target"])
+
+    start_nodes = [n["id"] for n in wf.get("nodes", []) if n.get("type") == "start"]
+    visited: set[str] = set()
+    in_stack: set[str] = set()
+    cycle_edges: set[tuple[str, str]] = set()
+
+    def _dfs(node: str) -> None:
+        visited.add(node)
+        in_stack.add(node)
+        for nxt in adjacency.get(node, []):
+            if nxt in in_stack:
+                log.warning(f"Cycle detected: edge {node} -> {nxt}")
+                cycle_edges.add((node, nxt))
+            elif nxt not in visited:
+                _dfs(nxt)
+        in_stack.discard(node)
+
+    for s in start_nodes:
+        _dfs(s)
+
+    if cycle_edges:
+        wf["edges"] = [e for e in wf["edges"] if (e["source"], e["target"]) not in cycle_edges]
+
     return wf
 
 GENERATE_PROMPT = """You are a workflow DAG designer. Given a natural language description, generate a workflow as JSON.
@@ -124,6 +163,9 @@ Available node types:
 - delay: pause execution. data: {{"seconds": N}}
 - approval: pauses workflow, waits for human to click Continue. data: {{"message": "what needs approval"}}
 - notify: sends notification via iMessage/Slack. The message field is a PROMPT that the LLM will use to compose the notification from conversation context. data: {{"channel": "imessage", "message": "describe what to notify about", "wait_for_ack": false}}
+- discover: AI-powered knowledge discovery. Searches for resources about a target topic. data: {{"target": "topic to discover", "scope": ["wiki", "code", "quip", "web"], "collection": "collection-name", "instructions": "optional steering instructions"}}
+- ingest: indexes content into the knowledge base vector DB. Processes URLs found in previous prompt node outputs — runs fetch, chunk, summarize, tag, embed, link pipeline. Also deduplicates against existing documents. data: {{"collection": "collection-name", "auto_dedup": true}}
+- memory-search: searches the knowledge base for previously ingested content. Returns ranked results from vector similarity search. data: {{"collection": "collection-name", "query": "search query", "top_k": 10}}
 - end: terminal node. Always exactly one. data: {{}}
 
 Rules:
@@ -134,6 +176,8 @@ Rules:
 5. Generate realistic, detailed prompt text for each prompt node — not just summaries
 6. If the user mentions notifications/alerts, use notify nodes (not prompt nodes)
 7. If the user mentions waiting for approval, use approval nodes
+8. For knowledge ingestion/indexing workflows, use prompt nodes for search/discovery steps (where the tool actually searches), followed by an ingest node that indexes the results. The ingest node automatically extracts URLs from previous prompt outputs and processes them.
+9. When building search workflows, create separate prompt nodes for each search type (wikis, code, quip docs, web) with detailed instructions for the tool to search and list found URLs.
 
 User request: {user_text}
 Tool to use: {tool}

@@ -40,6 +40,7 @@ class ClaudeAdapter(BaseAdapter):
         process_holder: object = None,
         config: Optional[dict] = None,
     ) -> dict:
+        proc = None
         try:
             cfg = config or {}
             adapter_cfg = cfg.get("adapters", {}).get("claude", {})
@@ -83,9 +84,18 @@ class ClaudeAdapter(BaseAdapter):
         except subprocess.TimeoutExpired:
             if proc:
                 proc.kill()
+                proc.wait()
             return {"success": False, "output": "", "error": f"Timed out after {timeout}s", "session_id": None}
         except FileNotFoundError:
             return {"success": False, "output": "", "error": "claude CLI not found", "session_id": None}
+        except Exception as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+            return {"success": False, "output": "", "error": str(exc)[:200], "session_id": None}
 
     def list_sessions(self, cwd: str, config: Optional[dict] = None) -> list:
         """List Claude Code sessions. Returns empty — Claude's --resume list is unreliable in non-interactive mode."""

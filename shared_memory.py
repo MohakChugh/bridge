@@ -5,6 +5,7 @@ Used by all tools (Claude/Wasabi/Kiro) for context retrieval.
 """
 
 from __future__ import annotations
+import collections
 import json
 import logging
 import os
@@ -13,13 +14,32 @@ import struct
 import time
 from typing import Optional
 
+import threading as _threading
+from event_bus import get_event_bus
+
 log = logging.getLogger("shared_memory")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared-memory.db")
+DB_PATH = os.environ.get(
+    "BRIDGE_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared-memory.db"),
+)
 EMBEDDING_DIM = 384
 SIMILARITY_THRESHOLD = 0.75
+MAX_DOC_LOCKS = 256
 
 _instance: Optional["SharedMemory"] = None
+
+_doc_locks: collections.OrderedDict[str, _threading.RLock] = collections.OrderedDict()
+_doc_locks_guard = _threading.Lock()
+
+def get_doc_lock(doc_id: str) -> _threading.RLock:
+    """Get or create a per-document lock to serialize concurrent ingestion."""
+    with _doc_locks_guard:
+        if doc_id not in _doc_locks:
+            _doc_locks[doc_id] = _threading.RLock()
+        if len(_doc_locks) > MAX_DOC_LOCKS:
+            _doc_locks.popitem(last=False)
+        return _doc_locks[doc_id]
 
 
 def get_shared_memory(db_path: str = DB_PATH) -> "SharedMemory":
@@ -103,6 +123,8 @@ class SharedMemory:
             );
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+                ON edges(source_id, target_id, relation);
 
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +146,51 @@ class SharedMemory:
             self.db.execute("ALTER TABLE memories ADD COLUMN summary TEXT")
             self.db.execute("ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'")
         self.db.commit()
+        try:
+            self.db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_url_collection "
+                "ON documents(source_url, collection)"
+            )
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass
+
+        # Agent Brain tables
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                mode TEXT DEFAULT 'safe',
+                messages TEXT DEFAULT '[]',
+                turns INTEGER DEFAULT 0,
+                cost REAL DEFAULT 0.0,
+                result TEXT,
+                error TEXT,
+                progress_pct INTEGER DEFAULT 0,
+                progress_msg TEXT DEFAULT '',
+                parent_id TEXT,
+                created_at REAL,
+                updated_at REAL,
+                completed_at REAL,
+                metadata TEXT DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_id);
+
+            CREATE TABLE IF NOT EXISTS agent_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT,
+                tool TEXT,
+                args TEXT,
+                result TEXT,
+                is_error INTEGER DEFAULT 0,
+                approved_by TEXT,
+                timestamp REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_audit_task ON agent_audit(task_id);
+        """)
 
     def _get_model(self):
         if self._model is None:
@@ -287,6 +354,17 @@ class SharedMemory:
 
     def register_document(self, name: str, source_type: str, source_url: str, collection: str, tags: Optional[list[str]] = None, persona: Optional[str] = None) -> str:
         import uuid
+        existing = self.db.execute(
+            "SELECT id FROM documents WHERE source_url = ? AND collection = ?",
+            (source_url, collection),
+        ).fetchone()
+        if existing:
+            get_event_bus().publish("document.register.duplicate", {
+                "doc_id": existing["id"],
+                "source_url": source_url,
+                "collection": collection,
+            })
+            return existing["id"]
         doc_id = str(uuid.uuid4())[:12]
         self.db.execute(
             "INSERT OR REPLACE INTO documents (id, name, source_type, source_url, collection, tags, persona, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -294,6 +372,14 @@ class SharedMemory:
         )
         self.db.commit()
         self.create_collection(collection)
+        get_event_bus().publish("document.registered", {
+            "doc_id": doc_id,
+            "name": name,
+            "source_type": source_type,
+            "source_url": source_url,
+            "collection": collection,
+            "tags": tags or [],
+        })
         return doc_id
 
     def list_documents(self) -> list[dict]:
@@ -305,29 +391,100 @@ class SharedMemory:
         return dict(row) if row else None
 
     def delete_document(self, doc_id: str) -> bool:
+        doc = self.get_document(doc_id)
+        if not doc:
+            return False
+        # Collect memory IDs BEFORE deleting anything
+        memory_ids = [r[0] for r in self.db.execute(
+            "SELECT id FROM memories WHERE document_id = ?", (doc_id,)
+        ).fetchall()]
+        chunk_count = len(memory_ids)
+        if memory_ids:
+            placeholders = ",".join("?" for _ in memory_ids)
+            edge_count = self.db.execute(
+                f"SELECT COUNT(*) FROM edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                (*memory_ids, *memory_ids),
+            ).fetchone()[0]
+        else:
+            edge_count = 0
+        get_event_bus().publish("document.deleting", {
+            "doc_id": doc_id, "name": doc.get("name"),
+            "chunks_to_delete": chunk_count, "edges_to_delete": edge_count,
+        })
+        # Delete edges FIRST (while memory IDs still exist for reference)
+        if memory_ids:
+            self.db.execute(
+                f"DELETE FROM edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                (*memory_ids, *memory_ids),
+            )
+        # Then delete memories
         self.db.execute("DELETE FROM memories WHERE document_id = ?", (doc_id,))
+        # Finally delete the document record
         self.db.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self.db.commit()
+        get_event_bus().publish("document.deleted", {
+            "doc_id": doc_id, "name": doc.get("name"),
+            "chunks_deleted": chunk_count, "edges_deleted": edge_count,
+            "collection": doc.get("collection"),
+        })
         return True
 
     def update_document_chunks(self, doc_id: str, chunk_count: int) -> None:
         self.db.execute("UPDATE documents SET chunk_count = ?, last_refreshed = ? WHERE id = ?", (chunk_count, time.time(), doc_id))
         self.db.commit()
+        get_event_bus().publish("document.ingested", {
+            "doc_id": doc_id, "chunk_count": chunk_count,
+        })
 
     def refresh_document(self, doc_id: str) -> None:
-        self.db.execute("DELETE FROM memories WHERE document_id = ?", (doc_id,))
-        self.db.execute("DELETE FROM edges WHERE source_id IN (SELECT id FROM memories WHERE document_id = ?) OR target_id IN (SELECT id FROM memories WHERE document_id = ?)", (doc_id, doc_id))
-        self.db.commit()
+        doc_lock = get_doc_lock(doc_id)
+        with doc_lock:
+            # Collect memory IDs BEFORE deleting anything
+            memory_ids = [r[0] for r in self.db.execute(
+                "SELECT id FROM memories WHERE document_id = ?", (doc_id,)
+            ).fetchall()]
+            chunk_count = len(memory_ids)
+            if memory_ids:
+                placeholders = ",".join("?" for _ in memory_ids)
+                edge_count = self.db.execute(
+                    f"SELECT COUNT(*) FROM edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    (*memory_ids, *memory_ids),
+                ).fetchone()[0]
+            else:
+                edge_count = 0
+            if chunk_count > 0 or edge_count > 0:
+                get_event_bus().publish("document.refresh.started", {
+                    "doc_id": doc_id, "chunks_clearing": chunk_count, "edges_clearing": edge_count,
+                })
+            # Delete edges FIRST (while memory IDs still available)
+            if memory_ids:
+                self.db.execute(
+                    f"DELETE FROM edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    (*memory_ids, *memory_ids),
+                )
+            # Then delete memories
+            self.db.execute("DELETE FROM memories WHERE document_id = ?", (doc_id,))
+            self.db.commit()
+            get_event_bus().publish("document.refresh.cleared", {
+                "doc_id": doc_id, "chunks_deleted": chunk_count, "edges_deleted": edge_count,
+            })
 
     # ---- Edges (Knowledge Graph) ----
 
     def create_edge(self, source_id: int, target_id: int, relation: str, metadata: Optional[dict] = None) -> int:
         cur = self.db.execute(
-            "INSERT INTO edges (source_id, target_id, relation, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO edges (source_id, target_id, relation, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
             (source_id, target_id, relation, json.dumps(metadata or {}), time.time()),
         )
         self.db.commit()
-        return cur.lastrowid
+        if cur.lastrowid and cur.rowcount > 0:
+            return cur.lastrowid
+        # Edge already existed — return its id
+        row = self.db.execute(
+            "SELECT id FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?",
+            (source_id, target_id, relation),
+        ).fetchone()
+        return row["id"] if row else 0
 
     def get_edges(self, memory_id: Optional[int] = None) -> list[dict]:
         if memory_id:
@@ -337,15 +494,51 @@ class SharedMemory:
         return [dict(r) for r in rows]
 
     def get_graph(self) -> dict:
-        edges = self.db.execute("SELECT e.*, m1.text as source_text, m2.text as target_text FROM edges e LEFT JOIN memories m1 ON m1.id = e.source_id LEFT JOIN memories m2 ON m2.id = e.target_id").fetchall()
+        # Clean orphaned edges first (refs to deleted memories)
+        self.db.execute(
+            "DELETE FROM edges WHERE source_id NOT IN (SELECT id FROM memories) "
+            "OR target_id NOT IN (SELECT id FROM memories)"
+        )
+        self.db.commit()
+
+        edges = self.db.execute(
+            "SELECT e.*, "
+            "m1.text as source_text, m1.summary as source_summary, m1.tags as source_tags, "
+            "c1.name as source_collection, d1.name as source_document, "
+            "m2.text as target_text, m2.summary as target_summary, m2.tags as target_tags, "
+            "c2.name as target_collection, d2.name as target_document "
+            "FROM edges e "
+            "JOIN memories m1 ON m1.id = e.source_id "
+            "LEFT JOIN collections c1 ON c1.id = m1.collection_id "
+            "LEFT JOIN documents d1 ON d1.id = m1.document_id "
+            "JOIN memories m2 ON m2.id = e.target_id "
+            "LEFT JOIN collections c2 ON c2.id = m2.collection_id "
+            "LEFT JOIN documents d2 ON d2.id = m2.document_id"
+        ).fetchall()
         nodes_set = set()
         node_list = []
         edge_list = []
         for e in edges:
-            for nid, text in [(e["source_id"], e["source_text"]), (e["target_id"], e["target_text"])]:
+            for nid, text, summary, tags, collection, document in [
+                (e["source_id"], e["source_text"], e["source_summary"], e["source_tags"], e["source_collection"], e["source_document"]),
+                (e["target_id"], e["target_text"], e["target_summary"], e["target_tags"], e["target_collection"], e["target_document"]),
+            ]:
                 if nid not in nodes_set:
                     nodes_set.add(nid)
-                    node_list.append({"id": nid, "text": (text or "")[:100]})
+                    parsed_tags = []
+                    if tags:
+                        try:
+                            parsed_tags = json.loads(tags)
+                        except (json.JSONDecodeError, TypeError):
+                            parsed_tags = []
+                    node_list.append({
+                        "id": nid,
+                        "text": (text or "")[:100],
+                        "summary": summary or "",
+                        "tags": parsed_tags,
+                        "collection": collection or "",
+                        "document_name": document or "",
+                    })
             edge_list.append({"source": e["source_id"], "target": e["target_id"], "relation": e["relation"]})
         return {"nodes": node_list, "edges": edge_list}
 
@@ -353,6 +546,20 @@ class SharedMemory:
         cur = self.db.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
         self.db.commit()
         return cur.rowcount > 0
+
+    def purge_all(self) -> dict:
+        edges = self.db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        memories = self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        documents = self.db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        collections = self.db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
+        self.db.execute("DELETE FROM edges")
+        self.db.execute("DELETE FROM memory_tags")
+        self.db.execute("DELETE FROM memories")
+        self.db.execute("DELETE FROM documents")
+        self.db.execute("DELETE FROM collections")
+        self.db.execute("DELETE FROM tags")
+        self.db.commit()
+        return {"edges": edges, "memories": memories, "documents": documents, "collections": collections}
 
     # ---- Tags ----
 

@@ -14,7 +14,7 @@ export function RemindersList() {
   const items = data?.reminders ?? [];
 
   const deleteMut = useMutation({
-    mutationFn: (idx: number) => api.reminders.delete(idx),
+    mutationFn: (id: string) => api.reminders.delete(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reminders"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
@@ -83,6 +83,18 @@ export function SchedulesList() {
         prompt: wf.name,
         tool: wf.tool,
         params: sched.params,
+      });
+    }
+    if (wf.schedule) {
+      workflowSchedules.push({
+        ...wf.schedule,
+        id: `${wf.id}-legacy`,
+        _type: "workflow",
+        _workflow_id: wf.id,
+        _workflow_name: wf.name,
+        prompt: wf.name,
+        tool: wf.tool,
+        status: "active",
       });
     }
   }

@@ -1,5 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useIngestionStore } from "@/stores/ingestionStore";
+import { useLogStore } from "@/stores/logStore";
+import { useDocStore } from "@/stores/docStore";
+import { useAgentStore } from "@/stores/agentStore";
+import { useReviewStore } from "@/stores/reviewStore";
 
 export function useEventStream() {
   const qc = useQueryClient();
@@ -17,6 +22,9 @@ export function useEventStream() {
 
       ws.onopen = () => {
         retryRef.current = 0;
+        qc.invalidateQueries({ queryKey: ["dashboard"] });
+        qc.invalidateQueries({ queryKey: ["operations"] });
+        qc.invalidateQueries({ queryKey: ["sessions"] });
       };
 
       ws.onmessage = (e) => {
@@ -36,6 +44,7 @@ export function useEventStream() {
           ) {
             qc.invalidateQueries({ queryKey: ["sessions"] });
             qc.invalidateQueries({ queryKey: ["dashboard"] });
+            qc.invalidateQueries({ queryKey: ["operations"] });
             if (event.data?.id) {
               qc.invalidateQueries({ queryKey: ["session", event.data.id] });
             }
@@ -47,9 +56,60 @@ export function useEventStream() {
           if (t.startsWith("workflow.")) {
             qc.invalidateQueries({ queryKey: ["workflows"] });
             qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+            qc.invalidateQueries({ queryKey: ["operations"] });
             if (event.data?.run_id) {
               qc.invalidateQueries({ queryKey: ["workflow-run", event.data.run_id] });
             }
+          }
+          if (t.startsWith("agent.")) {
+            useAgentStore.getState().addLiveEvent({
+              id: crypto.randomUUID?.() || String(Date.now()),
+              type: t,
+              task_id: event.data?.task_id || "",
+              data: event.data || {},
+              timestamp: event.timestamp || Date.now() / 1000,
+            });
+            qc.invalidateQueries({ queryKey: ["agent-tasks"] });
+            if (event.data?.task_id) {
+              qc.invalidateQueries({ queryKey: ["agent-task", event.data.task_id] });
+            }
+          }
+          if (t === "ingestion.phase" || t.startsWith("document.")) {
+            useIngestionStore.getState().handleEvent(t, event.data);
+            qc.invalidateQueries({ queryKey: ["kb-documents"] });
+            qc.invalidateQueries({ queryKey: ["memory-stats"] });
+          }
+          if (t === "log.entry") {
+            useLogStore.getState().addLiveEntry(event.data);
+          }
+          if (t === "log.batch") {
+            qc.invalidateQueries({ queryKey: ["logs"] });
+            qc.invalidateQueries({ queryKey: ["log-stats"] });
+          }
+          if (t.startsWith("doc.")) {
+            qc.invalidateQueries({ queryKey: ["docs"] });
+            qc.invalidateQueries({ queryKey: ["doc-tree"] });
+            const docId = event.data?.doc_id || event.data?.id;
+            if (docId) qc.invalidateQueries({ queryKey: ["doc", docId] });
+          }
+          if (t === "cr.build.done") {
+            const d = event.data || {};
+            useReviewStore.getState().setReview({
+              buildStatus: d.success ? "pass" : "fail",
+              buildErrors: d.errors || d.stderr || "",
+            });
+          }
+          if (t === "doc.generation.started") {
+            useDocStore.getState().startGeneration(event.data.generation_id, event.data.doc_id, event.data.mode === "edit_selection" ? "edit_selection" : "generate");
+          }
+          if (t === "doc.generation.chunk") {
+            useDocStore.getState().appendChunk(event.data.chunk);
+          }
+          if (t === "doc.generation.completed") {
+            useDocStore.getState().completeGeneration();
+          }
+          if (t === "doc.generation.failed") {
+            useDocStore.getState().failGeneration(event.data.error);
           }
         } catch {}
       };

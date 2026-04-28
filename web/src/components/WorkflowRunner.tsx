@@ -26,21 +26,29 @@ const STATUS_STYLES: Record<string, string> = {
   skipped: "opacity-25 border-dashed",
 };
 
-export function WorkflowRunner() {
+interface WorkflowRunnerProps {
+  workflowId?: string;
+  runId?: string;
+  hideBackButton?: boolean;
+}
+
+export function WorkflowRunner({ workflowId: propWorkflowId, runId: propRunId, hideBackButton }: WorkflowRunnerProps = {}) {
   const { activeWorkflowId, activeRunId, setView } = useSessionStore();
+  const wfId = propWorkflowId || activeWorkflowId;
+  const rId = propRunId || activeRunId;
   const qc = useQueryClient();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const { data: workflow } = useQuery({
-    queryKey: ["workflow", activeWorkflowId],
-    queryFn: () => (activeWorkflowId ? api.workflows.get(activeWorkflowId) : null),
-    enabled: !!activeWorkflowId,
+    queryKey: ["workflow", wfId],
+    queryFn: () => (wfId ? api.workflows.get(wfId) : null),
+    enabled: !!wfId,
   });
 
   const { data: run } = useQuery({
-    queryKey: ["workflow-run", activeRunId],
-    queryFn: () => (activeWorkflowId && activeRunId ? api.workflows.getRun(activeWorkflowId, activeRunId) : null),
-    enabled: !!activeWorkflowId && !!activeRunId,
+    queryKey: ["workflow-run", rId],
+    queryFn: () => (wfId && rId ? api.workflows.getRun(wfId, rId) : null),
+    enabled: !!wfId && !!rId,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       return status === "running" || status === "paused" ? 1000 : false;
@@ -48,13 +56,13 @@ export function WorkflowRunner() {
   });
 
   const approveMut = useMutation({
-    mutationFn: () => api.workflows.approve(activeWorkflowId!, activeRunId!),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflow-run", activeRunId] }),
+    mutationFn: () => api.workflows.approve(wfId!, rId!),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflow-run", rId] }),
   });
 
   const abortMut = useMutation({
-    mutationFn: () => api.workflows.abort(activeWorkflowId!, activeRunId!),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflow-run", activeRunId] }),
+    mutationFn: () => api.workflows.abort(wfId!, rId!),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflow-run", rId] }),
   });
 
   if (!workflow || !run) {
@@ -90,9 +98,11 @@ export function WorkflowRunner() {
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 h-12 border-b border-border bg-card/50">
-        <Button variant="ghost" size="icon" onClick={() => setView("workflows")}>
-          <ArrowLeft className="w-4 h-4" />
-        </Button>
+        {!hideBackButton && (
+          <Button variant="ghost" size="icon" onClick={() => setView("workflows")}>
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+        )}
         <span className="text-sm font-semibold">{workflow.name}</span>
         <RunStatusBadge status={run.status} />
         <div className="flex-1" />

@@ -21,6 +21,8 @@ import session_store
 
 log = logging.getLogger("session_manager")
 
+MAX_HISTORY = 500
+
 
 @dataclass
 class Session:
@@ -38,6 +40,7 @@ class Session:
     last_output: Optional[str] = None
     last_error: Optional[str] = None
     meta: dict = field(default_factory=dict)  # channel-specific (slack ctx, imessage guid)
+    queued_messages: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -54,6 +57,7 @@ class Session:
             "last_output": self.last_output,
             "last_error": self.last_error,
             "meta": dict(self.meta) if self.meta else {},
+            "queued_count": len(self.queued_messages),
         }
 
 
@@ -61,7 +65,7 @@ class SessionManager:
     def __init__(self, config_provider: Callable[[], dict], max_parallel: int = 4):
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
-        self._session_locks: dict[str, threading.Lock] = {}
+        self._session_locks: dict[str, threading.RLock] = {}
         self._semaphore = threading.Semaphore(max_parallel)
         self._config_provider = config_provider
         self._bus = get_event_bus()
@@ -78,7 +82,7 @@ class SessionManager:
         )
         with self._lock:
             self._sessions[sid] = session
-            self._session_locks[sid] = threading.Lock()
+            self._session_locks[sid] = threading.RLock()
         self._bus.publish("session.created", session.to_dict())
         log.info(f"Session created: {sid} ({title})")
         return session
@@ -118,6 +122,8 @@ class SessionManager:
                 return
             entry = {"role": role, "text": text, "timestamp": time.time()}
             session.message_history.append(entry)
+            if len(session.message_history) > MAX_HISTORY:
+                session.message_history = session.message_history[-MAX_HISTORY:]
             session.updated_at = time.time()
         self._bus.publish("message.appended", {"session_id": sid, "message": entry})
 
@@ -280,6 +286,14 @@ class SessionManager:
                 "error": str(e),
             })
 
+        # Drain queued messages
+        sid = session.id
+        while session.queued_messages:
+            next_msg = session.queued_messages.pop(0)
+            log.info(f"Draining queued message for session {sid}: {next_msg[:60]}")
+            self.execute(sid, next_msg)
+            break  # execute() spawns a new worker, which will drain next on its completion
+
     def _persist_session(self, session: Session) -> None:
         try:
             session_store.save_session(session.to_dict())
@@ -324,7 +338,7 @@ class SessionManager:
         )
         with self._lock:
             self._sessions[session.id] = session
-            self._session_locks[session.id] = threading.Lock()
+            self._session_locks[session.id] = threading.RLock()
         self._bus.publish("session.resumed", session.to_dict())
         log.info(f"Session resumed: {session.id} ({session.title})")
         return session

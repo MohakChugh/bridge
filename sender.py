@@ -20,13 +20,16 @@ def send_imessage(chat_guid: str, text: str) -> Optional[str]:
     Appends an invisible marker so the daemon can identify its own messages.
     """
     marked_text = text + OUTBOUND_MARKER
-    result = subprocess.run(
-        ["osascript", "-", marked_text, chat_guid],
-        input=SEND_SCRIPT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-", marked_text, chat_guid],
+            input=SEND_SCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return "osascript timed out after 30s"
     if result.returncode != 0:
         return result.stderr.strip() or f"osascript exit {result.returncode}"
     return None

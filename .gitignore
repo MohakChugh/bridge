@@ -14,3 +14,12 @@ AGENTS.md
 sessions.json
 artifacts/
 shared-memory.db
+CR-*/
+docs/
+discovery_jobs.json
+.coverage
+web/QA_REPORT.md
+web/CR_REVIEW_QA_REPORT.md
+*.png
+*.jpeg
+*.jpg
