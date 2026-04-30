@@ -608,9 +608,9 @@ function ReviewChat() {
         {store.chatMessages.map((m, i) => (
           <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`rounded-xl px-3 py-2 ${
-              m.role === "user" ? "max-w-[85%] bg-primary text-primary-foreground text-xs" : "w-full bg-accent text-xs"}`}>
+              m.role === "user" ? "max-w-[85%] bg-primary text-primary-foreground text-xs" : "w-full bg-accent"}`}>
               {m.role === "assistant" ? (
-                <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                <div className="chat-markdown text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown></div>
               ) : <div className="whitespace-pre-wrap">{m.text}</div>}
             </div>
           </div>
@@ -1007,21 +1007,34 @@ export function CodeReview() {
     if (status === "completed" && output) {
       try {
         let reviews: any[] = [];
+        // Strip pipe-prefixed code fences (wasabi format: │ json)
+        let cleaned = output.replace(/^[│|]\s*json\s*$/gm, "").replace(/^[│|]\s*$/gm, "");
         // Try markdown code block first
-        const codeBlockMatch = output.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-        const jsonStr = codeBlockMatch ? codeBlockMatch[1] : output;
-        const s = jsonStr.indexOf("{");
-        const e = jsonStr.lastIndexOf("}");
+        const codeBlockMatch = cleaned.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
+        const jsonStr = codeBlockMatch ? codeBlockMatch[1] : cleaned;
+        // Fix line-wrapped JSON: join lines that break inside strings
+        const fixedJson = jsonStr.replace(/\n\s*/g, " ").replace(/,\s*}/g, "}").replace(/,\s*]/g, "]");
+        const s = fixedJson.indexOf("{");
+        const e = fixedJson.lastIndexOf("}");
         if (s >= 0 && e > s) {
-          const data = JSON.parse(jsonStr.slice(s, e + 1));
-          reviews = data.reviews || [];
+          try {
+            const data = JSON.parse(fixedJson.slice(s, e + 1));
+            reviews = data.reviews || [];
+          } catch {
+            // Try original (not line-joined) as fallback
+            const s2 = jsonStr.indexOf("{");
+            const e2 = jsonStr.lastIndexOf("}");
+            if (s2 >= 0 && e2 > s2) {
+              try { reviews = JSON.parse(jsonStr.slice(s2, e2 + 1)).reviews || []; } catch {}
+            }
+          }
         }
         // Also try array format
         if (!reviews.length) {
-          const as = jsonStr.indexOf("[");
-          const ae = jsonStr.lastIndexOf("]");
+          const as = fixedJson.indexOf("[");
+          const ae = fixedJson.lastIndexOf("]");
           if (as >= 0 && ae > as) {
-            reviews = JSON.parse(jsonStr.slice(as, ae + 1));
+            try { reviews = JSON.parse(fixedJson.slice(as, ae + 1)); } catch {}
           }
         }
         reviews.forEach((r: any) => {
@@ -1038,12 +1051,7 @@ export function CodeReview() {
           });
         });
         if (!reviews.length && output.trim().length > 10) {
-          // Fallback: LLM returned plain text review — add as single top-level comment
-          store.addComment({
-            id: crypto.randomUUID(), file: files[0]?.path || "", line: 0,
-            content: output.trim(), author: "auto", severity: "info",
-            timestamp: Date.now(), replies: [],
-          });
+          store.addChatMessage({ role: "assistant", text: output.trim() });
         }
       } catch (parseErr) {
         // JSON parse failed — treat entire output as a single review comment

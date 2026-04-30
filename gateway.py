@@ -372,7 +372,65 @@ def create_app(session_manager, daemon_ref, agent_brain=None) -> FastAPI:
 
     @app.get("/api/directories")
     def list_directories():
-        return daemon_ref.config.get("directories", {})
+        """Return dynamically discovered workspaces + any config overrides."""
+        import glob as _glob_mod
+
+        discovered = {}
+
+        # 1. Config overrides always included
+        for k, v in daemon_ref.config.get("directories", {}).items():
+            if os.path.isdir(v):
+                discovered[k] = v
+
+        # 2. Scan for Brazil workspaces (have packageInfo or .brazil/)
+        scan_roots = [
+            os.path.expanduser("~/workplace"),
+            os.path.expanduser("~/workspaces"),
+            "/Volumes/workplace",
+            "/Volumes/workspace",
+        ]
+        for root in scan_roots:
+            if not os.path.isdir(root):
+                continue
+            for entry in os.scandir(root):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                ws_path = entry.path
+                # Brazil workspace: has packageInfo or .brazil/
+                if os.path.exists(os.path.join(ws_path, "packageInfo")) or os.path.isdir(os.path.join(ws_path, ".brazil")):
+                    label = entry.name
+                    discovered[label] = ws_path
+                    # Also add individual packages under src/
+                    src_dir = os.path.join(ws_path, "src")
+                    if os.path.isdir(src_dir):
+                        for pkg in os.scandir(src_dir):
+                            if pkg.is_dir() and not pkg.name.startswith("."):
+                                discovered[f"{label}/{pkg.name}"] = pkg.path
+
+        # 3. Scan for git repos in home
+        home = os.path.expanduser("~")
+        for candidate in ["projects", "repos", "code", "dev", "src", ".claude/imessage-bridge"]:
+            cpath = os.path.join(home, candidate)
+            if os.path.isdir(cpath):
+                if os.path.isdir(os.path.join(cpath, ".git")):
+                    discovered[candidate] = cpath
+                else:
+                    for entry in os.scandir(cpath):
+                        if entry.is_dir() and os.path.isdir(os.path.join(entry.path, ".git")):
+                            discovered[f"{candidate}/{entry.name}"] = entry.path
+
+        # 4. CR workspaces
+        bridge_dir = os.path.dirname(os.path.abspath(__file__))
+        for entry in os.scandir(bridge_dir):
+            if entry.is_dir() and entry.name.startswith("CR-"):
+                discovered[entry.name] = entry.path
+
+        # 5. Always include /tmp and home
+        discovered.setdefault("tmp", "/tmp")
+        discovered.setdefault("home", home)
+        discovered.setdefault("bridge", bridge_dir)
+
+        return dict(sorted(discovered.items()))
 
     # ---- Sessions ----
 

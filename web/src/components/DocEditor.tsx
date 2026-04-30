@@ -283,12 +283,17 @@ function SafeEditorContent({ editor }: { editor: any }) {
   React.useEffect(() => {
     const el = containerRef.current;
     if (!el || !editor) return;
-    while (el.firstChild) el.removeChild(el.firstChild);
-    el.appendChild(editor.view.dom);
+    try {
+      const dom = editor.view?.dom;
+      if (!dom) return;
+      while (el.firstChild) el.removeChild(el.firstChild);
+      el.appendChild(dom);
+    } catch { return; }
     return () => {
-      if (el.contains(editor.view.dom)) {
-        el.removeChild(editor.view.dom);
-      }
+      try {
+        const dom = editor.view?.dom;
+        if (dom && el.contains(dom)) el.removeChild(dom);
+      } catch {}
     };
   }, [editor]);
 
@@ -393,6 +398,7 @@ function DocEditorPane({ docId }: { docId: string }) {
       }
     },
     onSelectionUpdate: ({ editor: e }) => {
+      if (e.isDestroyed) return;
       const { from, to } = e.state.selection;
       if (from !== to) {
         const text = e.state.doc.textBetween(from, to, "\n");
@@ -425,8 +431,11 @@ function DocEditorPane({ docId }: { docId: string }) {
     if (!isDirty || !contentInitializedRef.current || !editor) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      const md = editor.storage.markdown.getMarkdown();
-      saveMut.mutate({ content: md });
+      try {
+        if (editor.isDestroyed) return;
+        const md = editor.storage.markdown.getMarkdown();
+        saveMut.mutate({ content: md });
+      } catch {}
     }, 2000);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
   }, [isDirty, editor]);
@@ -481,7 +490,7 @@ function DocEditorPane({ docId }: { docId: string }) {
   // Destroy editor on unmount to prevent stale DOM + duplicate extension errors
   useEffect(() => {
     return () => {
-      if (editor) editor.destroy();
+      try { if (editor && !editor.isDestroyed) editor.destroy(); } catch {}
     };
   }, [editor]);
 

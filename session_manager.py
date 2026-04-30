@@ -223,13 +223,16 @@ class SessionManager:
                 except Exception as e:
                     log.debug(f"Memory injection skipped: {e}")
 
+            session_config = dict(config)
+            if session.meta.get("preserve_output", False):
+                session_config["_parsing_mode"] = True
             spawn_kwargs = dict(
                 prompt=prompt,
                 cwd=session.cwd,
                 timeout=timeout,
                 resume_session_id=session.tool_session_id,
                 process_holder=holder,
-                config=config,
+                config=session_config,
             )
             # Pass history for adapters that support it (wasabi needs it)
             try:

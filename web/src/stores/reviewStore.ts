@@ -184,6 +184,7 @@ export const useReviewStore = create<ReviewState>()(
         buildStatus: s.buildStatus,
         buildErrors: s.buildErrors,
         savedComments: s.savedComments,
+        fetchCommentsStatus: s.fetchCommentsStatus,
       }),
     },
   ),
