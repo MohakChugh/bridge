@@ -300,6 +300,7 @@ class Daemon:
         threading.Thread(target=self._reminder_loop, daemon=True).start()
         threading.Thread(target=self._schedule_loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
         log.info(f"Daemon started. Watching chat.db (watermark={self.state['watermark']})")
 
@@ -1517,6 +1518,70 @@ class Daemon:
             save_state(STATE_PATH, self.state)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _heartbeat_loop(self) -> None:
+        """Proactive heartbeat — periodic ambient awareness checks.
+
+        Configurable via config.json:
+          "heartbeat": {"enabled": true, "interval_seconds": 300, "checks": ["watches", "schedules", "sessions"]}
+
+        Default: every 5 minutes, check for stuck sessions and missed watch alerts.
+        """
+        hb_cfg = self.config.get("heartbeat", {})
+        if not hb_cfg.get("enabled", False):
+            log.info("Heartbeat loop disabled (set heartbeat.enabled=true in config to enable)")
+            return
+
+        interval = hb_cfg.get("interval_seconds", 300)
+        checks = hb_cfg.get("checks", ["watches", "sessions"])
+        log.info("Heartbeat loop started: interval=%ds, checks=%s", interval, checks)
+
+        while self.running:
+            time.sleep(interval)
+            if not self.running:
+                break
+
+            try:
+                alerts = []
+
+                if "sessions" in checks:
+                    busy = [s for s in self.session_manager.list_active() if s.get("status") == "busy"]
+                    stuck = [s for s in busy if (time.time() - s.get("updated_at", 0)) > 1800]
+                    if stuck:
+                        alerts.append(f"{len(stuck)} stuck session(s) running >30min")
+
+                if "watches" in checks:
+                    for w in self.state.get("watches", []):
+                        if w.get("status") == "active" and w.get("last_alert"):
+                            age = time.time() - w["last_alert"]
+                            if age < interval * 2:
+                                alerts.append(f"Watch '{w.get('description', 'unknown')}' alerted {int(age/60)}m ago")
+
+                if "schedules" in checks:
+                    for s in self.state.get("scheduled_tasks", []):
+                        if s.get("status") == "active" and s.get("last_error"):
+                            alerts.append(f"Schedule '{s.get('human', 'unknown')}' last run failed")
+
+                if alerts:
+                    from event_bus import get_event_bus
+                    get_event_bus().publish("heartbeat.alerts", {
+                        "count": len(alerts),
+                        "alerts": alerts,
+                        "timestamp": time.time(),
+                    })
+                    log.info("Heartbeat: %d alert(s) — %s", len(alerts), "; ".join(alerts))
+
+                    prompt = hb_cfg.get("alert_prompt")
+                    if prompt and self.session_manager:
+                        summary = "\n".join(f"- {a}" for a in alerts)
+                        full_prompt = f"{prompt}\n\nCurrent alerts:\n{summary}"
+                        tool = self.config.get("cli_tool", "wasabi")
+                        cwd = self.config.get("directories", {}).get("default", "/tmp")
+                        s = self.session_manager.create(tool=tool, cwd=cwd, title="Heartbeat Alert")
+                        self.session_manager.execute(s.id, full_prompt)
+
+            except Exception as e:
+                log.debug("Heartbeat check failed: %s", e)
 
     def _reminder_loop(self) -> None:
         """Background thread that fires reminders (in-memory + persisted)."""

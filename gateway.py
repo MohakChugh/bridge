@@ -489,6 +489,16 @@ def create_app(session_manager, daemon_ref, agent_brain=None) -> FastAPI:
         ok = session_manager.cancel(sid)
         return {"cancelled": ok}
 
+    @app.post("/api/sessions/{sid}/set-tool")
+    def set_session_tool(sid: str, body: dict):
+        tool = body.get("tool")
+        if not tool:
+            raise HTTPException(status_code=400, detail="tool required")
+        ok = session_manager.set_tool(sid, tool)
+        if not ok:
+            raise HTTPException(status_code=400, detail="Session not found or busy")
+        return {"updated": True, "tool": tool}
+
     @app.delete("/api/sessions/{sid}")
     def delete_session(sid: str):
         ok = session_manager.delete(sid)
@@ -2113,6 +2123,45 @@ def create_app(session_manager, daemon_ref, agent_brain=None) -> FastAPI:
             except Exception:
                 pass
             log.info("WS client disconnected")
+
+    # ---- Triggers / Webhooks ----
+
+    @app.get("/api/triggers")
+    def list_triggers():
+        from webhook_triggers import get_trigger_manager
+        return {"triggers": get_trigger_manager().list_all()}
+
+    @app.post("/api/triggers")
+    def create_trigger(body: dict):
+        from webhook_triggers import get_trigger_manager
+        t = get_trigger_manager().add(
+            name=body.get("name", "Unnamed"),
+            event_pattern=body.get("event_pattern", ".*"),
+            action=body.get("action", "session"),
+            action_config=body.get("action_config", {}),
+            data_filter=body.get("data_filter", {}),
+            cooldown_seconds=body.get("cooldown_seconds", 60),
+        )
+        return t.to_dict()
+
+    @app.delete("/api/triggers/{trigger_id}")
+    def delete_trigger(trigger_id: str):
+        from webhook_triggers import get_trigger_manager
+        return {"deleted": get_trigger_manager().remove(trigger_id)}
+
+    @app.post("/api/triggers/{trigger_id}/toggle")
+    def toggle_trigger(trigger_id: str, body: dict):
+        from webhook_triggers import get_trigger_manager
+        return {"toggled": get_trigger_manager().toggle(trigger_id, body.get("enabled", True))}
+
+    @app.post("/api/webhooks/event")
+    def receive_webhook_event(body: dict):
+        """External webhook receiver — injects event into event bus."""
+        event_type = body.get("type", "webhook.received")
+        event_data = body.get("data", body)
+        from event_bus import get_event_bus
+        get_event_bus().publish(event_type, event_data)
+        return {"received": True, "type": event_type}
 
     # ---- Static (React build) ----
 

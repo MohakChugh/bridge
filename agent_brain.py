@@ -73,12 +73,100 @@ class AgentBrain:
             orphans = self._store.list_tasks(status=status)
             for task in orphans:
                 if task["id"] not in self._active_threads:
-                    task["status"] = "failed"
-                    task["error"] = "Interrupted by daemon restart"
-                    task["completed_at"] = time.time()
-                    task["updated_at"] = time.time()
-                    self._store.save_task(task)
-                    log.info(f"Cleaned up orphaned task {task['id']}: {task['title']}")
+                    checkpoint = task.get("metadata", {}).get("checkpoint_turn", 0)
+                    if checkpoint > 0 and task.get("messages"):
+                        log.info("Resuming orphaned task %s from checkpoint turn %d", task["id"], checkpoint)
+                        self._resume_from_checkpoint(task)
+                    else:
+                        task["status"] = "failed"
+                        task["error"] = "Interrupted by daemon restart"
+                        task["completed_at"] = time.time()
+                        task["updated_at"] = time.time()
+                        self._store.save_task(task)
+                        log.info("Cleaned up orphaned task %s: %s", task["id"], task["title"])
+
+    def _resume_from_checkpoint(self, task: dict):
+        """Resume a task from its last checkpoint."""
+        task_id = task["id"]
+        task["status"] = "pending"
+        task["error"] = None
+        task["metadata"]["resumed_from_turn"] = task.get("metadata", {}).get("checkpoint_turn", 0)
+        task["updated_at"] = time.time()
+        self._store.save_task(task)
+
+        self._cancel_flags[task_id] = False
+        self._pause_flags[task_id] = False
+
+        thread = threading.Thread(target=self._run_task_loop, args=(task_id,), daemon=True, name=f"agent-resume-{task_id}")
+        self._active_threads[task_id] = thread
+        thread.start()
+        self._bus.publish("agent.task.resumed", {"task_id": task_id, "from_turn": task["metadata"]["resumed_from_turn"]})
+
+    # ---- Git Worktree Isolation ----
+
+    def _create_worktree(self, task_id: str, config: dict) -> Optional[str]:
+        """Create a git worktree for isolated task execution.
+        Returns worktree path or None if not in a git repo."""
+        import subprocess
+        bridge_dir = os.path.dirname(os.path.abspath(__file__))
+        worktree_base = os.path.join(bridge_dir, ".agent-worktrees")
+        worktree_path = os.path.join(worktree_base, f"task-{task_id}")
+
+        # Find a suitable git repo to branch from
+        default_dir = config.get("directories", {}).get("default", "/tmp")
+        git_dir = self._find_git_root(default_dir) or self._find_git_root(bridge_dir)
+        if not git_dir:
+            log.debug("No git repo found for worktree, using default cwd")
+            return None
+
+        try:
+            os.makedirs(worktree_base, exist_ok=True)
+            branch_name = f"agent/{task_id}"
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+                cwd=git_dir, capture_output=True, text=True, timeout=30,
+            )
+            if os.path.isdir(worktree_path):
+                log.info("Created worktree at %s for task %s", worktree_path, task_id)
+                return worktree_path
+        except Exception as e:
+            log.warning("Worktree creation failed for task %s: %s", task_id, e)
+        return None
+
+    def _cleanup_worktree(self, worktree_path: str, task_id: str) -> None:
+        """Remove a git worktree after task completes."""
+        import subprocess, shutil
+        try:
+            parent_git = self._find_git_root(os.path.dirname(worktree_path.rstrip("/")))
+            if parent_git:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", worktree_path],
+                    cwd=parent_git, capture_output=True, text=True, timeout=15,
+                )
+            if os.path.isdir(worktree_path):
+                shutil.rmtree(worktree_path, ignore_errors=True)
+            branch_name = f"agent/{task_id}"
+            if parent_git:
+                subprocess.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=parent_git, capture_output=True, text=True, timeout=10,
+                )
+            log.info("Cleaned up worktree for task %s", task_id)
+        except Exception as e:
+            log.warning("Worktree cleanup failed for task %s: %s", task_id, e)
+
+    @staticmethod
+    def _find_git_root(path: str) -> Optional[str]:
+        """Walk up to find .git directory."""
+        current = os.path.abspath(path)
+        for _ in range(10):
+            if os.path.isdir(os.path.join(current, ".git")):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        return None
 
     # ---- Public API ----
 
@@ -218,6 +306,12 @@ class AgentBrain:
         self._store.save_task(task)
         self._bus.publish("agent.task.running", {"task_id": task_id})
 
+        # Git-isolated worktree for this task
+        worktree_path = self._create_worktree(task_id, config)
+        if worktree_path:
+            task["metadata"]["worktree"] = worktree_path
+            self._store.save_task(task)
+
         start_time = time.time()
         messages = list(task.get("messages") or [])
 
@@ -269,9 +363,11 @@ class AgentBrain:
                     task["error"] = f"Timeout ({int(max_time)}s)"
                     break
 
-                # Persist + publish before LLM call so UI shows progress
+                # Checkpoint: persist full state so task can resume after crash
                 task["messages"] = messages
                 task["updated_at"] = time.time()
+                task["metadata"]["checkpoint_turn"] = task["turns"]
+                task["metadata"]["checkpoint_time"] = time.time()
                 self._store.save_task(task)
                 self._bus.publish("agent.progress", {
                     "task_id": task_id,
@@ -394,6 +490,10 @@ class AgentBrain:
                 "result": task.get("result", "")[:500] if task.get("result") else None,
                 "error": task.get("error"),
             })
+            # Cleanup git worktree
+            wt = task.get("metadata", {}).get("worktree")
+            if wt:
+                self._cleanup_worktree(wt, task_id)
             self._active_threads.pop(task_id, None)
             self._cancel_flags.pop(task_id, None)
             self._pause_flags.pop(task_id, None)
@@ -428,9 +528,11 @@ class AgentBrain:
         })
 
         try:
+            task = self._store.get_task(task_id)
+            task_cwd = (task or {}).get("metadata", {}).get("worktree") or config.get("directories", {}).get("default", "/tmp")
             result = adapter.spawn(
                 prompt=prompt,
-                cwd=config.get("directories", {}).get("default", "/tmp"),
+                cwd=task_cwd,
                 timeout=agent_cfg.get("step_timeout_seconds", 600),
                 config=parse_config,
             )

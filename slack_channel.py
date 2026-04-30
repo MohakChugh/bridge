@@ -148,6 +148,56 @@ class SlackChannel:
         except Exception as e:
             log.debug(f"React failed: {e}")
 
+    def get_thread_context(self, channel: str, thread_ts: str, limit: int = 20) -> list[dict]:
+        """Fetch full thread history for context injection."""
+        try:
+            resp = self.app.client.conversations_replies(
+                channel=channel, ts=thread_ts, limit=limit,
+            )
+            messages = []
+            for msg in resp.get("messages", []):
+                role = "assistant" if msg.get("bot_id") else "user"
+                messages.append({
+                    "role": role,
+                    "text": msg.get("text", ""),
+                    "user": msg.get("user", ""),
+                    "ts": msg.get("ts", ""),
+                })
+            return messages
+        except Exception as e:
+            log.warning("Failed to fetch thread context: %s", e)
+            return []
+
+    def upload_file(self, filepath: str, ctx: Optional[dict] = None, title: Optional[str] = None) -> bool:
+        """Upload a file to a Slack channel/thread."""
+        if not ctx or not ctx.get("channel"):
+            return False
+        try:
+            self.app.client.files_upload_v2(
+                channel=ctx["channel"],
+                file=filepath,
+                title=title or os.path.basename(filepath),
+                thread_ts=ctx.get("thread_ts"),
+            )
+            return True
+        except Exception as e:
+            log.error("File upload failed: %s", e)
+            return False
+
+    def send_blocks(self, blocks: list[dict], text: str = "", ctx: Optional[dict] = None) -> None:
+        """Send rich Block Kit message."""
+        if not ctx or not ctx.get("channel"):
+            return
+        try:
+            self.app.client.chat_postMessage(
+                channel=ctx["channel"],
+                blocks=blocks,
+                text=text or "Bridge notification",
+                thread_ts=ctx.get("thread_ts"),
+            )
+        except Exception as e:
+            log.error("Block Kit send failed: %s", e)
+
 
 _SLASH_COMMANDS = {
     "end", "status", "cancel", "help", "history", "sessions", "dirs",

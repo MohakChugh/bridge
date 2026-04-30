@@ -115,6 +115,22 @@ class SessionManager:
         self._bus.publish("session.updated", session.to_dict())
         return True
 
+    def set_tool(self, sid: str, tool: str) -> bool:
+        """Switch the LLM tool for a session (e.g. wasabi → kiro)."""
+        with self._lock:
+            session = self._sessions.get(sid)
+            if not session:
+                return False
+            if session.status == "busy":
+                return False
+            old_tool = session.tool
+            session.tool = tool
+            session.tool_session_id = None
+            session.updated_at = time.time()
+        self._bus.publish("session.updated", session.to_dict())
+        log.info("Session %s tool changed: %s → %s", sid, old_tool, tool)
+        return True
+
     def append_message(self, sid: str, role: str, text: str) -> None:
         with self._lock:
             session = self._sessions.get(sid)
@@ -204,6 +220,8 @@ class SessionManager:
 
             threading.Thread(target=poll_process, daemon=True).start()
 
+            original_prompt = prompt
+
             # Auto-inject memory context if enabled
             use_memory = session.meta.get("use_memory", config.get("auto_memory_inject", True))
             if use_memory:
@@ -222,6 +240,20 @@ class SessionManager:
                             prompt = context + prompt
                 except Exception as e:
                     log.debug(f"Memory injection skipped: {e}")
+
+            # Inject reinforcement guidance (SEPARATE from KB context)
+            try:
+                from reinforcement_memory import get_reinforcement_memory
+                rm = get_reinforcement_memory()
+                guidance = rm.build_guidance_block(
+                    domain=session.meta.get("domain"),
+                    tool=session.tool,
+                    limit=5,
+                )
+                if guidance:
+                    prompt = guidance + "\n" + prompt
+            except Exception as e:
+                log.debug(f"Reinforcement injection skipped: {e}")
 
             session_config = dict(config)
             if session.meta.get("preserve_output", False):
@@ -258,6 +290,29 @@ class SessionManager:
                     "id": session.id,
                     "output": result.get("output", ""),
                 })
+
+                # Detect corrections in user message → extract lesson
+                try:
+                    from reinforcement_memory import detect_correction, extract_lesson_from_correction, get_reinforcement_memory
+                    user_msg = original_prompt
+                    ai_out = result.get("output", "")
+                    if detect_correction(user_msg) and ai_out:
+                        rm = get_reinforcement_memory()
+                        rm.record_correction(session.id, user_msg, ai_out, user_msg)
+                        lesson = extract_lesson_from_correction(user_msg, ai_out, config)
+                        if lesson:
+                            lid = rm.add_lesson(
+                                pattern=lesson.get("pattern", ""),
+                                correction=lesson.get("correction", user_msg[:200]),
+                                right_approach=lesson.get("right_approach", ""),
+                                domain=lesson.get("domain", "general"),
+                                tool=session.tool,
+                                tags=lesson.get("tags", []),
+                                source_session_id=session.id,
+                            )
+                            log.info("Learned lesson #%d from session %s", lid, session.id)
+                except Exception as e:
+                    log.debug(f"Correction detection skipped: {e}")
             else:
                 session.status = "failed"
                 session.last_error = result.get("error", "Unknown error")

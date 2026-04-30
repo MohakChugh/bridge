@@ -47,6 +47,10 @@ export const api = {
       }),
     cancel: (id: string) =>
       request<{ cancelled: boolean }>(`/sessions/${id}/cancel`, { method: "POST" }),
+    setTool: (id: string, tool: string) =>
+      request<{ updated: boolean; tool: string }>(`/sessions/${id}/set-tool`, {
+        method: "POST", body: JSON.stringify({ tool }),
+      }),
     delete: (id: string) =>
       request<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   },

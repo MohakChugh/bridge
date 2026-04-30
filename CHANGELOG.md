@@ -7,6 +7,13 @@ All notable changes to Bridge are documented here.
 ## [Unreleased] — 2026-04-30
 
 ### Added
+- **Reinforcement Memory (self-learning)** — New `reinforcement_memory.py` with separate `reinforcement.db`. Detects user corrections, extracts behavioral lessons via LLM, injects as "BEHAVIORAL GUIDANCE" into future sessions. Completely isolated from knowledge base — never touches `shared-memory.db`.
+- **Git-isolated agent execution** — Agent tasks now run in isolated git worktrees (`git worktree add` per task). Each task gets its own branch `agent/{task_id}`, cleaned up on completion. Prevents parallel tasks from interfering.
+- **Event-driven triggers (webhooks)** — New `webhook_triggers.py` with `TriggerManager`. Create triggers that match event patterns + data filters → fire sessions, workflows, or notifications. API: GET/POST/DELETE `/api/triggers`, POST `/api/webhooks/event` for external webhook ingestion.
+- **Proactive heartbeat loop** — New `_heartbeat_loop()` in daemon. Configurable via `heartbeat` config key. Checks for stuck sessions (>30min), recent watch alerts, failed schedules. Publishes `heartbeat.alerts` event. Optionally spawns diagnostic session on alert. Default interval: 5 minutes.
+- **Agent checkpoint resume** — Agent tasks save full checkpoint (messages, turn count, timestamp) before each LLM call. On daemon restart, orphaned tasks with checkpoints auto-resume from last good state instead of failing.
+- **Model selector mid-session** — New `POST /api/sessions/{sid}/set-tool` endpoint + `session_manager.set_tool()`. Switch LLM tool (wasabi/kiro/claude) on idle sessions without creating new session. Frontend `api.sessions.setTool()` client method added.
+- **Slack full integration** — Added `get_thread_context()` (fetch full thread history), `upload_file()` (share files in threads), `send_blocks()` (Block Kit rich messages) to SlackChannel.
 - **Dynamic workspace discovery** — `/api/directories` now scans Brazil workspaces, git repos, and CR workspaces automatically instead of relying on hardcoded config
 - **KB context injection in AI Code Review** — AI Review searches shared_memory for top 10 relevant chunks based on package names + file paths, injects as review context
 - **KB context injection in Doc Studio** — AI Generate and AI Edit Selection search shared_memory for top 7 relevant chunks with source attribution (collection name + relevance score)
