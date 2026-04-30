@@ -90,6 +90,15 @@ export const api = {
     pause: (id: number) => request<any>(`/watches/${id}/pause`, { method: "POST" }),
     resume: (id: number) => request<any>(`/watches/${id}/resume`, { method: "POST" }),
   },
+  triggers: {
+    list: () => request<{ triggers: any[] }>("/triggers"),
+    create: (body: any) => request<any>("/triggers", { method: "POST", body: JSON.stringify(body) }),
+    delete: (id: string) => request<{ deleted: boolean }>(`/triggers/${id}`, { method: "DELETE" }),
+    toggle: (id: string, enabled: boolean) =>
+      request<{ toggled: boolean }>(`/triggers/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+    testEvent: (type: string, data: any) =>
+      request<{ received: boolean }>("/webhooks/event", { method: "POST", body: JSON.stringify({ type, data }) }),
+  },
   activity: () => request<{ events: any[] }>("/activity"),
   operations: () => request<any>("/operations"),
 
